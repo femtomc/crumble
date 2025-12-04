@@ -341,6 +341,10 @@ impl Env {
             "euclid", "run", "iota", "sine", "saw", "tri", "square", "cosine",
             "range", "every", "superimpose", "layer", "first-of",
             "inside", "outside", "off", "linger", "zoom", "compress",
+            // Effects (add metadata to events)
+            "delay", "delaytime", "delayfeedback", "room", "size",
+            "drive", "saturation", "gain", "pan", "lpf", "hpf",
+            "lpq", "hpq", "comp", "compressor",
             "+", "-", "*", "/",
         ] {
             bindings.insert(name.to_string(), Value::Function(name.to_string()));
@@ -686,6 +690,115 @@ fn eval_builtin(name: &str, args: &[Expr], env: &mut Env) -> Result<Value, LispE
             let end = eval(&args[1], env).and_then(to_fraction)?;
             let pat = eval(&args[2], env).and_then(to_pattern)?;
             Ok(Value::Pattern(pat.compress(start, end)))
+        }
+
+        // Effects - add metadata to pattern events
+        // These add key-value pairs to the hap's context.meta,
+        // which the audio engine reads to apply effects.
+        "delay" | "delaytime" => {
+            require_args(name, args, 2)?;
+            let amount = eval(&args[0], env).and_then(to_f64)?;
+            let pat = eval(&args[1], env).and_then(to_pattern)?;
+            Ok(Value::Pattern(pat.with_meta("delay".to_string(), amount.to_string())))
+        }
+
+        "delayfeedback" => {
+            require_args(name, args, 2)?;
+            let amount = eval(&args[0], env).and_then(to_f64)?;
+            let pat = eval(&args[1], env).and_then(to_pattern)?;
+            Ok(Value::Pattern(pat.with_meta("delayfeedback".to_string(), amount.to_string())))
+        }
+
+        "room" => {
+            require_args(name, args, 2)?;
+            let amount = eval(&args[0], env).and_then(to_f64)?;
+            let pat = eval(&args[1], env).and_then(to_pattern)?;
+            Ok(Value::Pattern(pat.with_meta("room".to_string(), amount.to_string())))
+        }
+
+        "size" => {
+            require_args(name, args, 2)?;
+            let amount = eval(&args[0], env).and_then(to_f64)?;
+            let pat = eval(&args[1], env).and_then(to_pattern)?;
+            Ok(Value::Pattern(pat.with_meta("size".to_string(), amount.to_string())))
+        }
+
+        "drive" | "saturation" => {
+            require_args(name, args, 2)?;
+            let amount = eval(&args[0], env).and_then(to_f64)?;
+            let pat = eval(&args[1], env).and_then(to_pattern)?;
+            Ok(Value::Pattern(pat.with_meta("drive".to_string(), amount.to_string())))
+        }
+
+        "gain" => {
+            require_args(name, args, 2)?;
+            let amount = eval(&args[0], env).and_then(to_f64)?;
+            let pat = eval(&args[1], env).and_then(to_pattern)?;
+            Ok(Value::Pattern(pat.with_meta("gain".to_string(), amount.to_string())))
+        }
+
+        "pan" => {
+            require_args(name, args, 2)?;
+            let amount = eval(&args[0], env).and_then(to_f64)?;
+            let pat = eval(&args[1], env).and_then(to_pattern)?;
+            Ok(Value::Pattern(pat.with_meta("pan".to_string(), amount.to_string())))
+        }
+
+        "lpf" => {
+            require_args(name, args, 2)?;
+            let freq = eval(&args[0], env).and_then(to_f64)?;
+            let pat = eval(&args[1], env).and_then(to_pattern)?;
+            Ok(Value::Pattern(pat.with_meta("lpf".to_string(), freq.to_string())))
+        }
+
+        "hpf" => {
+            require_args(name, args, 2)?;
+            let freq = eval(&args[0], env).and_then(to_f64)?;
+            let pat = eval(&args[1], env).and_then(to_pattern)?;
+            Ok(Value::Pattern(pat.with_meta("hpf".to_string(), freq.to_string())))
+        }
+
+        "lpq" => {
+            require_args(name, args, 2)?;
+            let q = eval(&args[0], env).and_then(to_f64)?;
+            let pat = eval(&args[1], env).and_then(to_pattern)?;
+            Ok(Value::Pattern(pat.with_meta("lpq".to_string(), q.to_string())))
+        }
+
+        "hpq" => {
+            require_args(name, args, 2)?;
+            let q = eval(&args[0], env).and_then(to_f64)?;
+            let pat = eval(&args[1], env).and_then(to_pattern)?;
+            Ok(Value::Pattern(pat.with_meta("hpq".to_string(), q.to_string())))
+        }
+
+        "comp" | "compressor" => {
+            // Compressor with threshold (dB), ratio, attack (s), release (s)
+            // Usage: (comp threshold ratio attack release pattern)
+            // Or simple: (comp threshold pattern) with defaults
+            if args.len() == 2 {
+                // Simple form: just threshold
+                let threshold = eval(&args[0], env).and_then(to_f64)?;
+                let pat = eval(&args[1], env).and_then(to_pattern)?;
+                Ok(Value::Pattern(pat.with_meta("comp_threshold".to_string(), threshold.to_string())))
+            } else if args.len() == 5 {
+                // Full form: threshold, ratio, attack, release, pattern
+                let threshold = eval(&args[0], env).and_then(to_f64)?;
+                let ratio = eval(&args[1], env).and_then(to_f64)?;
+                let attack = eval(&args[2], env).and_then(to_f64)?;
+                let release = eval(&args[3], env).and_then(to_f64)?;
+                let pat = eval(&args[4], env).and_then(to_pattern)?;
+                let pat = pat.with_meta("comp_threshold".to_string(), threshold.to_string());
+                let pat = pat.with_meta("comp_ratio".to_string(), ratio.to_string());
+                let pat = pat.with_meta("comp_attack".to_string(), attack.to_string());
+                let pat = pat.with_meta("comp_release".to_string(), release.to_string());
+                Ok(Value::Pattern(pat))
+            } else {
+                Err(LispError::EvalError(format!(
+                    "{} requires 2 or 5 arguments, got {}",
+                    name, args.len()
+                )))
+            }
         }
 
         // Arithmetic (for integer/float values)

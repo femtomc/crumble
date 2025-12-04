@@ -7,12 +7,31 @@
 
 export type Waveform = 'sine' | 'saw' | 'sawtooth' | 'square' | 'triangle' | 'noise';
 
+export interface EffectMeta {
+  delay?: number;       // Delay time (0-1)
+  delayfeedback?: number; // Delay feedback (0-1)
+  room?: number;        // Reverb room size (0-1)
+  size?: number;        // Reverb mix (0-1)
+  drive?: number;       // Saturation amount (0-1)
+  gain?: number;        // Per-event gain (0-1)
+  pan?: number;         // Pan position (-1 to 1)
+  lpf?: number;         // Low-pass filter frequency (Hz)
+  hpf?: number;         // High-pass filter frequency (Hz)
+  lpq?: number;         // Low-pass filter resonance (Q: 0.001 to 30)
+  hpq?: number;         // High-pass filter resonance (Q: 0.001 to 30)
+  comp_threshold?: number; // Compressor threshold (dB, -100 to 0)
+  comp_ratio?: number;     // Compressor ratio (1 to 20)
+  comp_attack?: number;    // Compressor attack (seconds, 0 to 1)
+  comp_release?: number;   // Compressor release (seconds, 0 to 1)
+}
+
 export interface SoundEvent {
   start: number;      // Start time in cycles
   end: number;        // End time in cycles
   value: string | number;
   whole_start?: number;
   whole_end?: number;
+  meta?: Record<string, string>;  // Effect metadata from Rust
 }
 
 export interface AudioEngineOptions {
@@ -30,6 +49,14 @@ export class AudioEngine {
   private ctx: AudioContext | null = null;
   private masterGain: GainNode | null = null;
   private options: Required<AudioEngineOptions>;
+
+  // Effect send nodes
+  private delayNode: DelayNode | null = null;
+  private delayFeedback: GainNode | null = null;
+  private delaySend: GainNode | null = null;
+  private reverbNode: ConvolverNode | null = null;
+  private reverbSend: GainNode | null = null;
+  private reverbBuffer: AudioBuffer | null = null;
 
   constructor(options: AudioEngineOptions = {}) {
     this.options = {
@@ -52,10 +79,66 @@ export class AudioEngine {
     this.masterGain.gain.value = this.options.gain;
     this.masterGain.connect(this.ctx.destination);
 
+    // Initialize effects
+    this.initDelay();
+    this.initReverb();
+
     // Resume if suspended
     if (this.ctx.state === 'suspended') {
       await this.ctx.resume();
     }
+  }
+
+  private initDelay(): void {
+    if (!this.ctx || !this.masterGain) return;
+
+    // Delay line with feedback
+    this.delayNode = this.ctx.createDelay(2.0);
+    this.delayNode.delayTime.value = 0.375; // Dotted eighth note at 120bpm
+
+    this.delayFeedback = this.ctx.createGain();
+    this.delayFeedback.gain.value = 0.4;
+
+    this.delaySend = this.ctx.createGain();
+    this.delaySend.gain.value = 0; // Dry by default
+
+    // Delay routing: send -> delay -> feedback loop -> master
+    this.delaySend.connect(this.delayNode);
+    this.delayNode.connect(this.delayFeedback);
+    this.delayFeedback.connect(this.delayNode);
+    this.delayNode.connect(this.masterGain);
+  }
+
+  private initReverb(): void {
+    if (!this.ctx || !this.masterGain) return;
+
+    // Create reverb convolver with impulse response
+    this.reverbNode = this.ctx.createConvolver();
+    this.reverbSend = this.ctx.createGain();
+    this.reverbSend.gain.value = 0; // Dry by default
+
+    // Generate synthetic impulse response
+    this.reverbBuffer = this.createReverbImpulse(2.0, 2.0);
+    this.reverbNode.buffer = this.reverbBuffer;
+
+    // Reverb routing
+    this.reverbSend.connect(this.reverbNode);
+    this.reverbNode.connect(this.masterGain);
+  }
+
+  private createReverbImpulse(duration: number, decay: number): AudioBuffer {
+    const sampleRate = this.ctx!.sampleRate;
+    const length = sampleRate * duration;
+    const buffer = this.ctx!.createBuffer(2, length, sampleRate);
+
+    for (let channel = 0; channel < 2; channel++) {
+      const data = buffer.getChannelData(channel);
+      for (let i = 0; i < length; i++) {
+        // Exponentially decaying noise
+        data[i] = (Math.random() * 2 - 1) * Math.pow(1 - i / length, decay);
+      }
+    }
+    return buffer;
   }
 
   /**
@@ -73,27 +156,185 @@ export class AudioEngine {
   }
 
   /**
-   * Play a sound at a specific time.
+   * Play a sound at a specific time with optional effects.
    */
-  playAt(time: number, duration: number, value: string | number): void {
+  playAt(time: number, duration: number, value: string | number, meta?: Record<string, string>): void {
     if (!this.ctx || !this.masterGain) return;
 
     const { waveform, freq, isKick } = this.parseValue(value);
+    const effects = this.parseEffects(meta);
 
     if (waveform === 'noise') {
-      this.playNoise(time, duration);
+      this.playNoise(time, duration, effects);
     } else if (isKick) {
-      this.playKick(time, duration);
+      this.playKick(time, duration, effects);
     } else {
-      this.playTone(time, duration, freq, waveform);
+      this.playTone(time, duration, freq, waveform, effects);
     }
   }
 
   /**
    * Play immediately.
    */
-  playNow(duration: number, value: string | number): void {
-    this.playAt(this.currentTime, duration, value);
+  playNow(duration: number, value: string | number, meta?: Record<string, string>): void {
+    this.playAt(this.currentTime, duration, value, meta);
+  }
+
+  /**
+   * Parse effect metadata from string values to numbers.
+   */
+  private parseEffects(meta?: Record<string, string>): EffectMeta {
+    if (!meta) return {};
+
+    return {
+      delay: meta.delay ? parseFloat(meta.delay) : undefined,
+      delayfeedback: meta.delayfeedback ? parseFloat(meta.delayfeedback) : undefined,
+      room: meta.room ? parseFloat(meta.room) : undefined,
+      size: meta.size ? parseFloat(meta.size) : undefined,
+      drive: meta.drive ? parseFloat(meta.drive) : undefined,
+      gain: meta.gain ? parseFloat(meta.gain) : undefined,
+      pan: meta.pan ? parseFloat(meta.pan) : undefined,
+      lpf: meta.lpf ? parseFloat(meta.lpf) : undefined,
+      hpf: meta.hpf ? parseFloat(meta.hpf) : undefined,
+      lpq: meta.lpq ? parseFloat(meta.lpq) : undefined,
+      hpq: meta.hpq ? parseFloat(meta.hpq) : undefined,
+      comp_threshold: meta.comp_threshold ? parseFloat(meta.comp_threshold) : undefined,
+      comp_ratio: meta.comp_ratio ? parseFloat(meta.comp_ratio) : undefined,
+      comp_attack: meta.comp_attack ? parseFloat(meta.comp_attack) : undefined,
+      comp_release: meta.comp_release ? parseFloat(meta.comp_release) : undefined,
+    };
+  }
+
+  /**
+   * Create a waveshaper curve for saturation/drive.
+   */
+  private createSaturationCurve(amount: number): Float32Array<ArrayBuffer> {
+    const samples = 44100;
+    const buffer = new ArrayBuffer(samples * 4);
+    const curve = new Float32Array(buffer);
+    const k = amount * 50; // Scale factor
+
+    for (let i = 0; i < samples; i++) {
+      const x = (i * 2) / samples - 1;
+      // Soft clipping curve
+      curve[i] = (Math.PI + k) * x / (Math.PI + k * Math.abs(x));
+    }
+    return curve;
+  }
+
+  /**
+   * Build the effect chain for a sound and return the output node.
+   * Creates per-event effect sends based on metadata.
+   */
+  private buildEffectChain(sourceGain: GainNode, time: number, effects: EffectMeta): AudioNode {
+    if (!this.ctx || !this.masterGain) return sourceGain;
+
+    let currentNode: AudioNode = sourceGain;
+
+    // Apply per-event gain
+    if (effects.gain !== undefined) {
+      const gainNode = this.ctx.createGain();
+      gainNode.gain.setValueAtTime(effects.gain, time);
+      currentNode.connect(gainNode);
+      currentNode = gainNode;
+    }
+
+    // Apply saturation/drive
+    if (effects.drive !== undefined && effects.drive > 0) {
+      const waveshaper = this.ctx.createWaveShaper();
+      waveshaper.curve = this.createSaturationCurve(effects.drive);
+      waveshaper.oversample = '2x';
+      currentNode.connect(waveshaper);
+      currentNode = waveshaper;
+    }
+
+    // Apply low-pass filter
+    if (effects.lpf !== undefined && effects.lpf > 0) {
+      const lpfNode = this.ctx.createBiquadFilter();
+      lpfNode.type = 'lowpass';
+      lpfNode.frequency.setValueAtTime(effects.lpf, time);
+      // Q ranges from 0.001 to 30, default 1. Higher = more resonance
+      lpfNode.Q.value = effects.lpq !== undefined ? Math.max(0.001, Math.min(30, effects.lpq)) : 1;
+      currentNode.connect(lpfNode);
+      currentNode = lpfNode;
+    }
+
+    // Apply high-pass filter
+    if (effects.hpf !== undefined && effects.hpf > 0) {
+      const hpfNode = this.ctx.createBiquadFilter();
+      hpfNode.type = 'highpass';
+      hpfNode.frequency.setValueAtTime(effects.hpf, time);
+      // Q ranges from 0.001 to 30, default 1. Higher = more resonance
+      hpfNode.Q.value = effects.hpq !== undefined ? Math.max(0.001, Math.min(30, effects.hpq)) : 1;
+      currentNode.connect(hpfNode);
+      currentNode = hpfNode;
+    }
+
+    // Apply compressor
+    if (effects.comp_threshold !== undefined) {
+      const compressor = this.ctx.createDynamicsCompressor();
+      // Threshold in dB (-100 to 0)
+      compressor.threshold.setValueAtTime(
+        Math.max(-100, Math.min(0, effects.comp_threshold)),
+        time
+      );
+      // Ratio (1 to 20, default 12)
+      compressor.ratio.setValueAtTime(
+        effects.comp_ratio !== undefined ? Math.max(1, Math.min(20, effects.comp_ratio)) : 12,
+        time
+      );
+      // Attack time in seconds (0 to 1, default 0.003)
+      compressor.attack.setValueAtTime(
+        effects.comp_attack !== undefined ? Math.max(0, Math.min(1, effects.comp_attack)) : 0.003,
+        time
+      );
+      // Release time in seconds (0 to 1, default 0.25)
+      compressor.release.setValueAtTime(
+        effects.comp_release !== undefined ? Math.max(0, Math.min(1, effects.comp_release)) : 0.25,
+        time
+      );
+      // Knee in dB (softness of compression curve)
+      compressor.knee.setValueAtTime(6, time);
+      currentNode.connect(compressor);
+      currentNode = compressor;
+    }
+
+    // Apply panning
+    if (effects.pan !== undefined) {
+      const panner = this.ctx.createStereoPanner();
+      panner.pan.setValueAtTime(Math.max(-1, Math.min(1, effects.pan)), time);
+      currentNode.connect(panner);
+      currentNode = panner;
+    }
+
+    // Connect to master
+    currentNode.connect(this.masterGain);
+
+    // Send to delay effect
+    if (effects.delay !== undefined && effects.delay > 0 && this.delaySend && this.delayNode) {
+      const delaySendGain = this.ctx.createGain();
+      delaySendGain.gain.setValueAtTime(effects.delay, time);
+      sourceGain.connect(delaySendGain);
+      delaySendGain.connect(this.delayNode);
+
+      // Update delay time if specified
+      if (effects.delayfeedback !== undefined && this.delayFeedback) {
+        this.delayFeedback.gain.setValueAtTime(effects.delayfeedback, time);
+      }
+    }
+
+    // Send to reverb effect
+    if ((effects.room !== undefined && effects.room > 0) || (effects.size !== undefined && effects.size > 0)) {
+      const roomAmount = effects.room ?? effects.size ?? 0;
+      if (this.reverbSend && this.reverbNode) {
+        const reverbSendGain = this.ctx.createGain();
+        reverbSendGain.gain.setValueAtTime(roomAmount, time);
+        sourceGain.connect(reverbSendGain);
+        reverbSendGain.connect(this.reverbNode);
+      }
+    }
+
+    return currentNode;
   }
 
   /**
@@ -175,7 +416,7 @@ export class AudioEngine {
     }
   }
 
-  private playTone(time: number, duration: number, freq: number, waveform: OscillatorType): void {
+  private playTone(time: number, duration: number, freq: number, waveform: OscillatorType, effects: EffectMeta = {}): void {
     if (!this.ctx || !this.masterGain) return;
 
     const osc = this.ctx.createOscillator();
@@ -185,7 +426,7 @@ export class AudioEngine {
     osc.type = waveform;
     osc.frequency.value = freq;
 
-    // Low-pass filter for warmth
+    // Low-pass filter for warmth (can be overridden by effects.lpf)
     filter.type = 'lowpass';
     filter.frequency.setValueAtTime(freq * 4, time);
     filter.frequency.exponentialRampToValueAtTime(freq * 2, time + 0.1);
@@ -205,13 +446,15 @@ export class AudioEngine {
 
     osc.connect(filter);
     filter.connect(gain);
-    gain.connect(this.masterGain);
+
+    // Apply effect chain
+    this.buildEffectChain(gain, time, effects);
 
     osc.start(time);
     osc.stop(time + duration + 0.1);
   }
 
-  private playKick(time: number, duration: number): void {
+  private playKick(time: number, duration: number, effects: EffectMeta = {}): void {
     if (!this.ctx || !this.masterGain) return;
 
     const osc = this.ctx.createOscillator();
@@ -228,13 +471,15 @@ export class AudioEngine {
     gain.gain.exponentialRampToValueAtTime(0.01, time + Math.min(duration, 0.3));
 
     osc.connect(gain);
-    gain.connect(this.masterGain);
+
+    // Apply effect chain
+    this.buildEffectChain(gain, time, effects);
 
     osc.start(time);
     osc.stop(time + Math.min(duration, 0.3) + 0.1);
   }
 
-  private playNoise(time: number, duration: number): void {
+  private playNoise(time: number, duration: number, effects: EffectMeta = {}): void {
     if (!this.ctx || !this.masterGain) return;
 
     // Create white noise buffer
@@ -262,7 +507,9 @@ export class AudioEngine {
 
     source.connect(filter);
     filter.connect(gain);
-    gain.connect(this.masterGain);
+
+    // Apply effect chain
+    this.buildEffectChain(gain, time, effects);
 
     source.start(time);
     source.stop(time + duration + 0.1);
@@ -419,7 +666,10 @@ export class PatternScheduler {
         ? (whole_end - whole_start) / this.cps
         : duration;
 
-      this.audio.playAt(triggerTime, actualDuration, value);
+      // Extract effect metadata
+      const meta = event instanceof Map ? event.get('meta') : event.meta;
+
+      this.audio.playAt(triggerTime, actualDuration, value, meta);
       this.scheduledEvents.add(eventKey);
 
       // Clean up old event keys (keep set from growing unbounded)

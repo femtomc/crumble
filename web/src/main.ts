@@ -6,6 +6,7 @@ import { scheme } from '@codemirror/legacy-modes/mode/scheme';
 import init, { evalLisp, JsPattern } from 'crumble';
 import { AudioEngine, PatternScheduler } from './audio';
 import type { SoundEvent } from './audio';
+import { OfflineRenderer, encodeWAV, downloadBlob, formatDuration } from './export';
 import './style.css';
 
 // Monospace theme with actual color values (CSS vars don't work in CM themes)
@@ -127,6 +128,12 @@ function setupUI() {
           <label for="volume-slider">Vol:</label>
           <input type="range" id="volume-slider" min="0" max="1" step="0.1" value="0.3" />
         </div>
+
+        <div class="control-group export-group">
+          <label for="cycles-input">Cycles:</label>
+          <input type="number" id="cycles-input" min="1" max="64" value="4" />
+          <button id="export-btn" class="btn btn-secondary">Export WAV</button>
+        </div>
       </div>
 
       <div id="editor" class="editor"></div>
@@ -146,6 +153,15 @@ function setupUI() {
           <li><code>(euclid k n val)</code> - euclidean rhythm</li>
           <li><code>(rev pat)</code> - reverse</li>
         </ul>
+        <h3>Effects</h3>
+        <ul>
+          <li><code>(delay amt pat)</code> - delay send (0-1)</li>
+          <li><code>(room amt pat)</code> - reverb send (0-1)</li>
+          <li><code>(drive amt pat)</code> - saturation (0-1)</li>
+          <li><code>(lpf hz pat)</code> - low-pass filter</li>
+          <li><code>(hpf hz pat)</code> - high-pass filter</li>
+          <li><code>(pan pos pat)</code> - stereo pan (-1 to 1)</li>
+        </ul>
       </div>
     </div>
   `;
@@ -161,7 +177,12 @@ function setupEditor() {
 ; Ctrl+Enter (Cmd+Enter on Mac) - evaluate & play
 ; Ctrl+. (Cmd+. on Mac) - stop
 
-(slow 2 (seq c4 e4 g4 c5 b4 g4 e4 c4))`;
+; Try some effects:
+; (delay 0.5 pat) - delay send
+; (room 0.3 pat) - reverb send
+; (drive 0.4 pat) - saturation
+
+(room 0.3 (delay 0.4 (slow 2 (seq c4 e4 g4 c5 b4 g4 e4 c4))))`;
 
   editor = new EditorView({
     doc: defaultCode,
@@ -200,6 +221,8 @@ function setupControls() {
   const tempoSlider = document.getElementById('tempo-slider') as HTMLInputElement;
   const tempoValue = document.getElementById('tempo-value')!;
   const volumeSlider = document.getElementById('volume-slider') as HTMLInputElement;
+  const cyclesInput = document.getElementById('cycles-input') as HTMLInputElement;
+  const exportBtn = document.getElementById('export-btn')!;
 
   playBtn.addEventListener('click', async () => {
     await startPlayback();
@@ -218,6 +241,10 @@ function setupControls() {
 
   volumeSlider.addEventListener('input', () => {
     audio.setVolume(parseFloat(volumeSlider.value));
+  });
+
+  exportBtn.addEventListener('click', async () => {
+    await exportWAV(parseInt(cyclesInput.value) || 4);
   });
 }
 
@@ -283,6 +310,76 @@ function evaluateCode() {
 function updateStatus(message: string) {
   const status = document.getElementById('status')!;
   status.textContent = message;
+}
+
+async function exportWAV(cycles: number) {
+  // First evaluate the current code
+  const code = editor.state.doc.toString();
+  if (!code.trim()) {
+    updateStatus('No code to export');
+    return;
+  }
+
+  let pattern: JsPattern;
+  try {
+    pattern = evalLisp(code);
+  } catch (e) {
+    updateStatus(`Error: ${e}`);
+    return;
+  }
+
+  updateStatus(`Rendering ${cycles} cycles...`);
+
+  const exportBtn = document.getElementById('export-btn')!;
+  exportBtn.textContent = 'Rendering...';
+  (exportBtn as HTMLButtonElement).disabled = true;
+
+  try {
+    // Get current tempo
+    const tempoSlider = document.getElementById('tempo-slider') as HTMLInputElement;
+    const bpm = parseInt(tempoSlider.value);
+    const cps = bpm / 60 / 4;
+
+    // Create offline renderer
+    const renderer = new OfflineRenderer({
+      cycles,
+      cps,
+      sampleRate: 44100,
+      gain: 0.3,
+    });
+
+    // Query function for the pattern
+    const queryFn = (start: number, end: number): SoundEvent[] => {
+      try {
+        return pattern.queryOnsets(start, end) as SoundEvent[];
+      } catch (e) {
+        console.error('Query error:', e);
+        return [];
+      }
+    };
+
+    // Render
+    const buffer = await renderer.render(queryFn);
+
+    // Encode to WAV
+    const wav = encodeWAV(buffer);
+
+    // Generate filename with timestamp
+    const timestamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+    const filename = `crumble-${timestamp}.wav`;
+
+    // Download
+    downloadBlob(wav, filename);
+
+    const duration = cycles / cps;
+    updateStatus(`Exported ${formatDuration(duration)} to ${filename}`);
+  } catch (e) {
+    updateStatus(`Export error: ${e}`);
+    console.error('Export error:', e);
+  } finally {
+    exportBtn.textContent = 'Export WAV';
+    (exportBtn as HTMLButtonElement).disabled = false;
+  }
 }
 
 // Start the app

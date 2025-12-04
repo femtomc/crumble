@@ -235,6 +235,45 @@ header .subtitle {
   --border-thickness: 3px;
 }
 
+.control-group input[type="number"] {
+  width: 6ch;
+  height: calc(var(--line-height) * 2);
+  padding: 0 1ch;
+  font: inherit;
+  font-size: 1rem;
+  font-variant-numeric: tabular-nums;
+  background: var(--background-color);
+  color: var(--text-color);
+  border: var(--border-thickness) solid var(--text-color);
+  text-align: center;
+  -moz-appearance: textfield;
+}
+
+.control-group input[type="number"]::-webkit-outer-spin-button,
+.control-group input[type="number"]::-webkit-inner-spin-button {
+  -webkit-appearance: none;
+  margin: 0;
+}
+
+.control-group input[type="number"]:focus {
+  outline: none;
+  --border-thickness: 3px;
+}
+
+.export-group {
+  margin-left: auto;
+}
+
+.btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.btn:disabled:hover {
+  transform: none;
+  background: var(--background-color);
+}
+
 #tempo-value {
   min-width: 4ch;
   text-align: right;

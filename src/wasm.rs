@@ -37,6 +37,13 @@ impl JsPattern {
             .into_iter()
             .map(|hap| {
                 let value = value_to_json(&hap.value);
+                // Convert context.meta to JSON object
+                let meta: serde_json::Map<String, serde_json::Value> = hap
+                    .context
+                    .meta
+                    .iter()
+                    .map(|(k, v)| (k.clone(), serde_json::json!(v)))
+                    .collect();
                 serde_json::json!({
                     "start": hap.part.begin.to_f64(),
                     "end": hap.part.end.to_f64(),
@@ -44,6 +51,7 @@ impl JsPattern {
                     "whole_end": hap.whole.as_ref().map(|w| w.end.to_f64()),
                     "value": value,
                     "has_onset": hap.has_onset(),
+                    "meta": meta,
                 })
             })
             .collect();
@@ -69,12 +77,20 @@ impl JsPattern {
             .filter(|hap| hap.has_onset())
             .map(|hap| {
                 let value = value_to_json(&hap.value);
+                // Convert context.meta to JSON object for effects
+                let meta: serde_json::Map<String, serde_json::Value> = hap
+                    .context
+                    .meta
+                    .iter()
+                    .map(|(k, v)| (k.clone(), serde_json::json!(v)))
+                    .collect();
                 serde_json::json!({
                     "start": hap.part.begin.to_f64(),
                     "end": hap.part.end.to_f64(),
                     "whole_start": hap.whole.as_ref().map(|w| w.begin.to_f64()),
                     "whole_end": hap.whole.as_ref().map(|w| w.end.to_f64()),
                     "value": value,
+                    "meta": meta,
                 })
             })
             .collect();

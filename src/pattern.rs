@@ -260,6 +260,15 @@ impl<T: Clone + Send + Sync + 'static> Pattern<T> {
         self.set_context(Context::new())
     }
 
+    /// Add a metadata key-value pair to all haps.
+    /// This is used for effect parameters like delay, reverb, etc.
+    pub fn with_meta(self, key: String, value: String) -> Self {
+        self.with_hap(move |mut hap| {
+            hap.context.meta.insert(key.clone(), value.clone());
+            hap
+        })
+    }
+
     // ============================================
     // Utility methods
     // ============================================
