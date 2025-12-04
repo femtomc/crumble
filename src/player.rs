@@ -5,7 +5,9 @@
 
 use crate::lisp::{run_lisp, Value};
 use crate::pattern::Pattern;
-use crate::scheduler::{play_blocking, SchedulerConfig, SchedulerHandle, start_scheduler};
+use crate::scheduler::SchedulerConfig;
+#[cfg(not(target_arch = "wasm32"))]
+use crate::scheduler::{play_blocking, SchedulerHandle, start_scheduler};
 
 #[cfg(feature = "audio")]
 use crate::audio::{AudioEngine, SoundParams};

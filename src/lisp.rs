@@ -53,6 +53,9 @@ use std::fmt;
 pub enum Token {
     LParen,
     RParen,
+    LBracket,  // [ for stack sugar
+    RBracket,  // ]
+    Comma,     // , separator in brackets
     Integer(i64),
     Float(f64),
     String(String),
@@ -84,6 +87,18 @@ pub fn tokenize(input: &str) -> Result<Vec<Token>, LispError> {
             }
             ')' => {
                 tokens.push(Token::RParen);
+                chars.next();
+            }
+            '[' => {
+                tokens.push(Token::LBracket);
+                chars.next();
+            }
+            ']' => {
+                tokens.push(Token::RBracket);
+                chars.next();
+            }
+            ',' => {
+                tokens.push(Token::Comma);
                 chars.next();
             }
             '"' => {
@@ -244,7 +259,27 @@ fn parse_expr(tokens: &[Token], pos: &mut usize) -> Result<Expr, LispError> {
             *pos += 1; // consume )
             Ok(Expr::List(items))
         }
+        Token::LBracket => {
+            // [a, b, c] is sugar for (stack a b c)
+            *pos += 1; // consume [
+            let mut items = vec![Expr::Symbol("stack".to_string())];
+            while *pos < tokens.len() && tokens[*pos] != Token::RBracket {
+                // Skip commas
+                if tokens[*pos] == Token::Comma {
+                    *pos += 1;
+                    continue;
+                }
+                items.push(parse_expr(tokens, pos)?);
+            }
+            if *pos >= tokens.len() {
+                return Err(LispError::ParseError("Unclosed bracket".to_string()));
+            }
+            *pos += 1; // consume ]
+            Ok(Expr::List(items))
+        }
         Token::RParen => Err(LispError::ParseError("Unexpected ')'".to_string())),
+        Token::RBracket => Err(LispError::ParseError("Unexpected ']'".to_string())),
+        Token::Comma => Err(LispError::ParseError("Unexpected ','".to_string())),
     }
 }
 
@@ -341,6 +376,8 @@ impl Env {
             "euclid", "run", "iota", "sine", "saw", "tri", "square", "cosine",
             "range", "every", "superimpose", "layer", "first-of",
             "inside", "outside", "off", "linger", "zoom", "compress",
+            // Chords
+            "chord",
             // Effects (add metadata to events)
             "delay", "delaytime", "delayfeedback", "room", "size",
             "drive", "saturation", "gain", "pan", "lpf", "hpf",
@@ -445,6 +482,50 @@ fn eval_builtin(name: &str, args: &[Expr], env: &mut Env) -> Result<Value, LispE
             let steps = eval(&args[1], env).and_then(to_i64)?;
             let val = eval(&args[2], env)?;
             Ok(Value::Pattern(euclid(pulses, steps, val)))
+        }
+
+        "chord" => {
+            // Usage: (chord c4 :minor7) or (chord c4 minor7) or (chord c4)
+            if args.is_empty() {
+                return Err(LispError::EvalError("chord requires at least a root note".to_string()));
+            }
+
+            // Get root note
+            let root_val = eval(&args[0], env)?;
+            let root_str = match &root_val {
+                Value::String(s) => s.clone(),
+                _ => return Err(LispError::TypeError("chord root must be a note name".to_string())),
+            };
+
+            let root_midi = parse_note(&root_str).ok_or_else(|| {
+                LispError::EvalError(format!("Invalid note: {}", root_str))
+            })?;
+
+            // Get chord type (default to major)
+            let chord_type = if args.len() > 1 {
+                let type_val = eval(&args[1], env)?;
+                match type_val {
+                    Value::String(s) => s.trim_start_matches(':').to_string(),
+                    _ => "major".to_string(),
+                }
+            } else {
+                "major".to_string()
+            };
+
+            let intervals = chord_intervals(&chord_type).ok_or_else(|| {
+                LispError::EvalError(format!("Unknown chord type: {}", chord_type))
+            })?;
+
+            // Build patterns for each note in the chord
+            let note_patterns: Vec<Pattern<Value>> = intervals
+                .iter()
+                .map(|&interval| {
+                    let note_name = midi_to_note(root_midi + interval);
+                    pure(Value::String(note_name))
+                })
+                .collect();
+
+            Ok(Value::Pattern(stack(note_patterns)))
         }
 
         "run" => {
@@ -866,6 +947,104 @@ fn eval_builtin(name: &str, args: &[Expr], env: &mut Env) -> Result<Value, LispE
 
         _ => Err(LispError::EvalError(format!("Unknown function: {}", name))),
     }
+}
+
+/// Get chord intervals (in semitones) for a chord type.
+/// Returns intervals relative to root (root is always 0).
+fn chord_intervals(chord_type: &str) -> Option<Vec<i64>> {
+    Some(match chord_type {
+        // Triads
+        "major" | "maj" | "" => vec![0, 4, 7],
+        "minor" | "min" | "m" => vec![0, 3, 7],
+        "dim" | "diminished" => vec![0, 3, 6],
+        "aug" | "augmented" | "+" => vec![0, 4, 8],
+        "sus2" => vec![0, 2, 7],
+        "sus4" => vec![0, 5, 7],
+
+        // Seventh chords
+        "7" | "dom7" => vec![0, 4, 7, 10],
+        "maj7" | "major7" => vec![0, 4, 7, 11],
+        "min7" | "minor7" | "m7" => vec![0, 3, 7, 10],
+        "dim7" | "diminished7" => vec![0, 3, 6, 9],
+        "hdim7" | "m7b5" | "half-diminished" => vec![0, 3, 6, 10],
+        "minmaj7" | "mM7" => vec![0, 3, 7, 11],
+        "aug7" | "+7" => vec![0, 4, 8, 10],
+
+        // Extended chords
+        "9" | "dom9" => vec![0, 4, 7, 10, 14],
+        "maj9" | "major9" => vec![0, 4, 7, 11, 14],
+        "min9" | "minor9" | "m9" => vec![0, 3, 7, 10, 14],
+        "11" => vec![0, 4, 7, 10, 14, 17],
+        "13" => vec![0, 4, 7, 10, 14, 21],
+
+        // Add chords
+        "add9" => vec![0, 4, 7, 14],
+        "add11" => vec![0, 4, 7, 17],
+
+        // Power chord
+        "5" | "power" => vec![0, 7],
+
+        _ => return None,
+    })
+}
+
+/// Parse a note name like "c4", "d#3", "eb5" into a MIDI note number.
+/// Returns None if the string isn't a valid note.
+fn parse_note(s: &str) -> Option<i64> {
+    let s = s.to_lowercase();
+    let mut chars = s.chars().peekable();
+
+    // Get the note letter
+    let letter = chars.next()?;
+    let base = match letter {
+        'c' => 0,
+        'd' => 2,
+        'e' => 4,
+        'f' => 5,
+        'g' => 7,
+        'a' => 9,
+        'b' => 11,
+        _ => return None,
+    };
+
+    // Check for accidentals
+    let mut accidental = 0i64;
+    while let Some(&c) = chars.peek() {
+        match c {
+            '#' | 's' => { accidental += 1; chars.next(); }
+            'b' | 'f' => { accidental -= 1; chars.next(); }
+            _ => break,
+        }
+    }
+
+    // Get the octave number
+    let octave_str: String = chars.collect();
+    let octave: i64 = octave_str.parse().ok()?;
+
+    // MIDI note: C4 = 60
+    Some((octave + 1) * 12 + base + accidental)
+}
+
+/// Convert a MIDI note number back to a note name.
+fn midi_to_note(midi: i64) -> String {
+    let octave = (midi / 12) - 1;
+    let note_in_octave = midi % 12;
+    let note_name = match note_in_octave {
+        0 => "c",
+        1 => "cs",
+        2 => "d",
+        3 => "ds",
+        4 => "e",
+        5 => "f",
+        6 => "fs",
+        7 => "g",
+        8 => "gs",
+        9 => "a",
+        10 => "as",
+        11 => "b",
+        _ => "c",
+    };
+    format!("{}{}", note_name, octave)
 }
 
 fn require_args(name: &str, args: &[Expr], expected: usize) -> Result<(), LispError> {

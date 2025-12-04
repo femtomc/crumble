@@ -147,12 +147,19 @@ function setupUI() {
         <h3>Quick Reference</h3>
         <ul>
           <li><code>(seq a b c)</code> - sequence patterns</li>
-          <li><code>(stack a b)</code> - layer patterns</li>
+          <li><code>[a, b, c]</code> - stack/chord (sugar for stack)</li>
           <li><code>~</code> - rest/silence</li>
           <li><code>(fast n pat)</code> - speed up</li>
           <li><code>(slow n pat)</code> - slow down</li>
           <li><code>(euclid k n val)</code> - euclidean rhythm</li>
           <li><code>(rev pat)</code> - reverse</li>
+        </ul>
+        <h3>Chords</h3>
+        <ul>
+          <li><code>(chord c4 :major)</code> - C major triad</li>
+          <li><code>(chord a3 :minor7)</code> - A minor 7th</li>
+          <li><code>(chord d4 :dom7)</code> - D dominant 7th</li>
+          <li><code>(chord e4 :sus4)</code> - E suspended 4th</li>
         </ul>
         <h3>Effects</h3>
         <ul>
@@ -177,24 +184,36 @@ function setupEditor() {
 
 ; -- hyper light drift --
 (stack
-  ; ethereal lead melody
+  ; crystalline lead melody - the drifter's theme
   (room 0.6 (delay 0.5
-    (lpq 4 (lpf 2000
-      (slow 4 (seq e4 ~ g4 b4 e5 ~ d5 b4))))))
+    (lpq 4 (lpf 2400 (gain 0.7
+      (slow 4 (seq
+        e5 ~ g5 b5 ~ ~ d5 ~
+        b4 ~ e5 ~ g5 ~ ~ ~)))))))
+
+  ; warm chord bed - Em Cmaj7 G D
+  (room 0.5 (lpf 1400 (gain 0.3
+    (slow 4 (seq
+      (chord e3 :m7)
+      (chord c3 :maj7)
+      (chord g3 :major)
+      (chord d3 :major))))))
 
   ; shimmering arpeggio
   (pan -0.3 (room 0.5 (delay 0.4
-    (lpf 3000 (gain 0.4
-      (fast 2 (seq e5 b4 ~ e4 g4 b4 ~ d5)))))))
+    (lpf 3000 (gain 0.35
+      (fast 2 (seq e5 b4 ~ g4 b4 ~ d5 ~)))))))
 
   ; slow 808 bass - sparse and heavy
   (drive 0.3 (lpf 180 (comp -24
-    (slow 2 (seq e2 ~ ~ e2 ~ e2 ~ b1)))))
+    (slow 2 (seq e2 ~ ~ e2 ~ g2 ~ d2)))))
 
-  ; distant pad drone
-  (pan 0.3 (room 0.7
-    (lpq 2 (lpf 800 (gain 0.25
-      (slow 8 (seq e3 ~ b3 ~ g3 ~ b3 ~)))))))
+  ; distant pad texture
+  (pan 0.4 (room 0.8
+    (lpq 2 (lpf 800 (gain 0.2
+      (slow 8 (seq
+        [e3, b3] ~ [g3, d4] ~
+        [c3, g3] ~ [d3, a3] ~)))))))
 )`;
 
   editor = new EditorView({

@@ -66,7 +66,7 @@ pub mod audio;
 #[cfg(feature = "osc")]
 pub mod osc;
 
-#[cfg(feature = "audio")]
+#[cfg(all(feature = "audio", not(target_arch = "wasm32")))]
 pub mod player;
 
 // WASM bindings
@@ -96,8 +96,8 @@ pub use scheduler::{SchedulerHandle, start_scheduler, play_blocking};
 #[cfg(feature = "audio")]
 pub use audio::{AudioEngine, SoundParams, Waveform};
 
-// Re-export player (when feature enabled)
-#[cfg(feature = "audio")]
+// Re-export player (when feature enabled, native only)
+#[cfg(all(feature = "audio", not(target_arch = "wasm32")))]
 pub use player::{Player, PlayerConfig, OutputMode, PlayHandle};
 
 // Re-export OSC (when feature enabled)
@@ -121,6 +121,6 @@ pub mod prelude {
     #[cfg(not(target_arch = "wasm32"))]
     pub use crate::scheduler::play_blocking;
 
-    #[cfg(feature = "audio")]
+    #[cfg(all(feature = "audio", not(target_arch = "wasm32")))]
     pub use crate::player::{Player, PlayerConfig};
 }
