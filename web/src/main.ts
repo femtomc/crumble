@@ -158,22 +158,10 @@ function setupEditor() {
   const defaultCode = `; Welcome to crumble!
 ; A live coding environment for algorithmic music.
 ;
-; Evaluate patterns with Ctrl+Enter (Cmd+Enter on Mac)
-; Stop playback with Ctrl+. (Cmd+. on Mac)
+; Ctrl+Enter (Cmd+Enter on Mac) - evaluate & play
+; Ctrl+. (Cmd+. on Mac) - stop
 
-; Melodic synth pattern:
-(slow 2 (seq c4 e4 g4 c5 b4 g4 e4 c4))
-
-; Drum patterns:
-; (seq kick snare kick snare)
-; (euclid 3 8 kick)
-; (fast 2 (seq kick snare hihat hihat))
-
-; Layer drums and melody:
-; (stack
-;   (seq kick ~ kick ~)
-;   (seq ~ snare ~ snare)
-;   (slow 2 (seq c4 e4 g4 e4)))`;
+(slow 2 (seq c4 e4 g4 c5 b4 g4 e4 c4))`;
 
   editor = new EditorView({
     doc: defaultCode,
@@ -260,47 +248,14 @@ function stopPlayback() {
 function evaluateCode() {
   const code = editor.state.doc.toString();
 
-  // Find the last non-comment, non-empty expression
-  const lines = code.split('\n');
-  let expression = '';
-
-  for (let i = lines.length - 1; i >= 0; i--) {
-    const line = lines[i].trim();
-    if (line && !line.startsWith(';')) {
-      // Found a non-comment line, now find the full expression
-      // Look backwards for opening paren
-      let parenCount = 0;
-      let exprLines: string[] = [];
-
-      for (let j = i; j >= 0; j--) {
-        const l = lines[j].trim();
-        if (!l || l.startsWith(';')) continue;
-
-        exprLines.unshift(l);
-
-        for (const char of l) {
-          if (char === '(') parenCount++;
-          if (char === ')') parenCount--;
-        }
-
-        if (parenCount === 0 && exprLines.length > 0) {
-          break;
-        }
-      }
-
-      expression = exprLines.join(' ');
-      break;
-    }
-  }
-
-  if (!expression) {
-    updateStatus('No expression found');
+  if (!code.trim()) {
+    updateStatus('No code to evaluate');
     return;
   }
 
   try {
-    currentPattern = evalLisp(expression);
-    updateStatus(`Evaluated: ${expression.substring(0, 50)}${expression.length > 50 ? '...' : ''}`);
+    currentPattern = evalLisp(code);
+    updateStatus('Evaluated');
 
     // Set up the query function for the scheduler
     scheduler.setPattern((start: number, end: number): SoundEvent[] => {
