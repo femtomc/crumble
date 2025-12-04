@@ -175,7 +175,7 @@ pub fn tokenize(input: &str) -> Result<Vec<Token>, LispError> {
 }
 
 fn is_symbol_char(c: char) -> bool {
-    c.is_alphanumeric() || matches!(c, '_' | '-' | '+' | '*' | '/' | '!' | '?' | '<' | '>' | '=' | ':' | '.')
+    c.is_alphanumeric() || matches!(c, '_' | '-' | '+' | '*' | '/' | '!' | '?' | '<' | '>' | '=' | ':' | '.' | '~')
 }
 
 /// AST node for Lisp expressions.
