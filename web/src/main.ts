@@ -170,19 +170,31 @@ function setupUI() {
 function setupEditor() {
   const editorContainer = document.getElementById('editor')!;
 
-  // Default pattern
-  const defaultCode = `; Welcome to crumble!
-; A live coding environment for algorithmic music.
-;
-; Ctrl+Enter (Cmd+Enter on Mac) - evaluate & play
-; Ctrl+. (Cmd+. on Mac) - stop
+  // Default pattern - Hyper Light Drifter inspired synthscape
+  const defaultCode = `; crumble - live coding patterns
+; Ctrl+Enter to play | Ctrl+. to stop
 
-; Try some effects:
-; (delay 0.5 pat) - delay send
-; (room 0.3 pat) - reverb send
-; (drive 0.4 pat) - saturation
+; -- hyper light drift --
+(stack
+  ; ethereal lead melody
+  (room 0.6 (delay 0.5
+    (lpq 4 (lpf 2000
+      (slow 4 (seq e4 g4 b4 e5 d5 b4 g4 f#4))))))
 
-(room 0.3 (delay 0.4 (slow 2 (seq c4 e4 g4 c5 b4 g4 e4 c4))))`;
+  ; shimmering arpeggio
+  (pan -0.3 (room 0.5 (delay 0.4
+    (lpf 3000 (gain 0.4
+      (fast 2 (seq e5 b4 g4 e4 g4 b4 e5 d5)))))))
+
+  ; slow 808 bass - sparse and heavy
+  (drive 0.3 (lpf 180 (comp -24
+    (slow 4 (seq e2 e2 e2 b1)))))
+
+  ; distant pad drone
+  (pan 0.3 (room 0.7
+    (lpq 2 (lpf 800 (gain 0.25
+      (slow 8 (seq e3 b3 g3 b3)))))))
+)`;
 
   editor = new EditorView({
     doc: defaultCode,
