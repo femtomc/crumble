@@ -1,0 +1,27 @@
+[package]
+name = "crumble"
+version = "0.1.0"
+edition = "2021"
+description = "A Rust implementation of the Strudel pattern language for algorithmic music"
+license = "AGPL-3.0"
+
+[features]
+default = ["audio", "osc"]
+audio = ["cpal"]
+osc = ["rosc"]
+
+[dependencies]
+num-rational = "0.4"
+num-traits = "0.2"
+num-integer = "0.1"
+
+# Audio output
+cpal = { version = "0.15", optional = true }
+
+# OSC for SuperCollider communication
+rosc = { version = "0.10", optional = true }
+
+# Thread-safe channels
+crossbeam-channel = "0.5"
+
+[dev-dependencies]
