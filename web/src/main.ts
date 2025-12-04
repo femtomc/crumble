@@ -18,7 +18,7 @@ import {
   type ActiveHap,
 } from './eventHighlight';
 import { drawPianoroll, type PianorollHap } from './pianoroll';
-import { drawScope, type ScopeHap } from './scope';
+import { drawScope } from './scope';
 import {
   widgetExtension,
   updateWidgets,
@@ -126,12 +126,6 @@ const activeHaps = new Map<number, { hap: ActiveHap; endTime: number }>();
 let hapIdCounter = 0;
 let highlightFrameId: number | null = null;
 
-// Pianoroll state
-let pianorollCanvas: HTMLCanvasElement | null = null;
-let pianorollCtx: CanvasRenderingContext2D | null = null;
-let pianorollFrameId: number | null = null;
-let pianorollHaps: PianorollHap[] = [];
-
 // Inline widget state
 interface InlineWidget {
   id: string;
@@ -182,7 +176,6 @@ async function initApp() {
   // Set up UI
   setupUI();
   setupEditor();
-  setupPianoroll();
   setupControls();
 
   // Update status
@@ -224,88 +217,6 @@ function stopHighlightLoop() {
   activeHaps.clear();
   if (editor) {
     clearHighlights(editor);
-  }
-}
-
-// Set up the pianoroll canvas
-function setupPianoroll() {
-  pianorollCanvas = document.getElementById('pianoroll') as HTMLCanvasElement;
-  if (!pianorollCanvas) return;
-
-  const container = pianorollCanvas.parentElement!;
-  const pixelRatio = window.devicePixelRatio || 1;
-
-  // Size the canvas to fit container
-  const resize = () => {
-    if (!pianorollCanvas) return;
-    const width = container.clientWidth;
-    const height = 80;
-    pianorollCanvas.width = width * pixelRatio;
-    pianorollCanvas.height = height * pixelRatio;
-    pianorollCanvas.style.width = `${width}px`;
-    pianorollCanvas.style.height = `${height}px`;
-  };
-
-  resize();
-  window.addEventListener('resize', resize);
-
-  pianorollCtx = pianorollCanvas.getContext('2d');
-}
-
-// Start the pianoroll animation loop
-function startPianorollLoop() {
-  if (pianorollFrameId !== null || !pianorollCtx || !currentPattern) return;
-
-  const cycles = 4;
-  const playhead = 0.5;
-
-  const animate = () => {
-    if (!pianorollCtx || !currentPattern || !scheduler.isRunning) {
-      pianorollFrameId = null;
-      return;
-    }
-
-    const time = audio.currentTime;
-
-    // Query haps for visible time range
-    const from = time - cycles * playhead;
-    const to = time + cycles * (1 - playhead);
-
-    try {
-      // Query all events (not just onsets) for visualization
-      const events = currentPattern.query(from, to) as PianorollHap[];
-      pianorollHaps = events;
-    } catch (e) {
-      // Ignore query errors
-    }
-
-    // Draw the pianoroll
-    drawPianoroll(pianorollCtx, time, pianorollHaps, {
-      cycles,
-      playhead,
-      fold: true,
-      autorange: true,
-      active: '#FFCA28',
-      inactive: 'rgba(116, 145, 210, 0.6)',
-      playheadColor: 'rgba(255, 255, 255, 0.8)',
-    });
-
-    pianorollFrameId = requestAnimationFrame(animate);
-  };
-
-  pianorollFrameId = requestAnimationFrame(animate);
-}
-
-// Stop the pianoroll animation loop
-function stopPianorollLoop() {
-  if (pianorollFrameId !== null) {
-    cancelAnimationFrame(pianorollFrameId);
-    pianorollFrameId = null;
-  }
-
-  // Clear the canvas
-  if (pianorollCtx && pianorollCanvas) {
-    pianorollCtx.clearRect(0, 0, pianorollCanvas.width, pianorollCanvas.height);
   }
 }
 
@@ -367,9 +278,10 @@ function startInlinePianorollLoop(widget: InlineWidget) {
       return;
     }
 
-    const time = audio.currentTime;
-    const from = time - cycles * playhead;
-    const to = time + cycles * (1 - playhead);
+    // Use cycle time from scheduler (synced with audio scheduling)
+    const cycleTime = scheduler.getCycleTime();
+    const from = cycleTime - cycles * playhead;
+    const to = cycleTime + cycles * (1 - playhead);
 
     try {
       const rawEvents = currentPattern.query(from, to) as unknown[];
@@ -388,14 +300,14 @@ function startInlinePianorollLoop(widget: InlineWidget) {
         return e as PianorollHap & { tags?: string[] };
       });
 
-      // Filter by widget tag if tags are available
+      // Filter by widget tag - only show events that have this widget's tag
       const events: PianorollHap[] = allEvents.filter((e) => {
-        // If no tags, include all events (fallback behavior)
-        if (!e.tags || e.tags.length === 0) return true;
+        // Only include events that are explicitly tagged for this widget
+        if (!e.tags || e.tags.length === 0) return false;
         return e.tags.includes(widget.id);
       });
 
-      drawPianoroll(widget.ctx, time, events, {
+      drawPianoroll(widget.ctx, cycleTime, events, {
         cycles,
         playhead,
         fold: true,
@@ -414,58 +326,41 @@ function startInlinePianorollLoop(widget: InlineWidget) {
   widget.frameId = requestAnimationFrame(animate);
 }
 
-// Start a scope animation for an inline widget
+// Start an audio oscilloscope animation for an inline widget
 function startInlineScopeLoop(widget: InlineWidget) {
-  const cycles = 4;
-  const playhead = 0.5;
+  let frameCount = 0;
 
   const animate = () => {
-    if (!currentPattern || !scheduler.isRunning) {
+    if (!scheduler.isRunning) {
       widget.frameId = null;
       return;
     }
 
-    const time = audio.currentTime;
-    const from = time - cycles * playhead;
-    const to = time + cycles * (1 - playhead);
+    // Get time-domain audio data from this scope's analyser (filtered to this pattern)
+    const audioData = audio.getScopeTimeDomainData(widget.id);
 
-    try {
-      const rawEvents = currentPattern.query(from, to) as unknown[];
-      // WASM returns Maps, convert to plain objects and filter by widget tag
-      const events: ScopeHap[] = rawEvents
-        .map((e: unknown) => {
-          if (e instanceof Map) {
-            return {
-              start: e.get('start') as number,
-              end: e.get('end') as number,
-              whole_start: e.get('whole_start') as number | undefined,
-              whole_end: e.get('whole_end') as number | undefined,
-              value: e.get('value'),
-              tags: e.get('tags') as string[] | undefined,
-            };
-          }
-          return e as ScopeHap & { tags?: string[] };
-        })
-        .filter((e) => {
-          // If no tags, include all events (fallback behavior)
-          if (!e.tags || e.tags.length === 0) return true;
-          return e.tags.includes(widget.id);
-        });
-
-      drawScope(widget.ctx, time, events, {
-        cycles,
-        playhead,
-        autorange: true,
-        bipolar: false,
-        fill: true,
-        dots: true,
-        activeColor: '#00FFAA',
-        inactiveColor: 'rgba(68, 136, 170, 0.6)',
-        playheadColor: 'rgba(255, 255, 255, 0.8)',
-      });
-    } catch (e) {
-      // Ignore query errors
+    // Debug: log audio data stats every 60 frames (~1 second)
+    if (frameCount % 60 === 0) {
+      if (!audioData) {
+        console.log(`[scope ${widget.id}] no analyser data (analyser not created yet?)`);
+      }
     }
+    if (frameCount % 60 === 0 && audioData) {
+      const min = Math.min(...audioData);
+      const max = Math.max(...audioData);
+      const rms = Math.sqrt(audioData.reduce((sum, v) => sum + v * v, 0) / audioData.length);
+      console.log(`[scope ${widget.id}] samples=${audioData.length}, min=${min.toFixed(4)}, max=${max.toFixed(4)}, rms=${rms.toFixed(4)}`);
+    }
+    frameCount++;
+
+    // Draw the oscilloscope waveform (using Strudel-like defaults)
+    drawScope(widget.ctx, audioData, {
+      align: true,
+      color: '#00FFAA',
+      thickness: 3,
+      scale: 0.25,  // Strudel default
+      pos: 0.5,
+    });
 
     widget.frameId = requestAnimationFrame(animate);
   };
@@ -517,10 +412,6 @@ function setupUI() {
 
       <div id="editor" class="editor"></div>
 
-      <div id="pianoroll-container" class="pianoroll-container">
-        <canvas id="pianoroll"></canvas>
-      </div>
-
       <div class="status-bar">
         <span id="status">Loading...</span>
         <span class="shortcuts">Ctrl+Enter: evaluate | Ctrl+.: stop</span>
@@ -571,43 +462,60 @@ function setupEditor() {
 ; Ctrl+Enter to play | Ctrl+. to stop
 
 ; -- hyper light drift --
-; wrap patterns in (pianoroll ...) or (scope ...) for inline visualization!
+; A melancholic synthscape in E minor
 
 (stack
-  ; crystalline lead melody - the drifter's theme
+  ; Thick detuned pad - the heart of the drift
+  (unison 5 (detune 15
+    (adsr 0.8 0.5 0.8 1.2
+      (fenv 800 (lpf 600 (gain 0.25
+        (slow 8 (seq
+          [e3, b3, g4]
+          [c3, g3, e4]
+          [d3, a3, f#4]
+          [b2, f#3, d4]))))))))
+
+  ; Crystalline arpeggio with delay
   (pianoroll
-    (room 0.6 (delay 0.5
-      (lpq 4 (lpf 2400 (gain 0.7
+    (room 0.6 (delay 0.375
+      (adsr 0.01 0.3 0.4 0.5
+        (fenv 1200 (lpf 2000 (gain 0.3
+          (fast 2 (seq
+            e5 b4 g4 e4
+            g5 d5 b4 g4
+            f#5 d5 a4 f#4
+            d5 b4 f#4 d4)))))))))
+
+  ; FM bell texture - distant memories
+  (fm 4 (fmratio 5.5
+    (adsr 0.01 1.0 0.2 1.5
+      (pan 0.3 (gain 0.15
         (slow 4 (seq
-          e5 ~ g5 b5 ~ ~ d5 ~
-          b4 ~ e5 ~ g5 ~ ~ ~))))))))
+          e6 ~ ~ b5
+          ~ g5 ~ ~
+          f#5 ~ ~ d5
+          ~ ~ b4 ~)))))))
 
-  ; LFO modulation visualized as scope (for continuous values)
-  (scope (slow 4 (sine)))
+  ; Sub bass pulse with oscilloscope
+  (scope
+    (adsr 0.02 0.4 0.6 0.3
+      (lpf 120 (gain 0.5
+        (slow 2 (seq
+          e2 ~ ~ e2
+          ~ c2 ~ ~
+          d2 ~ ~ d2
+          ~ b1 ~ ~))))))
 
-  ; warm chord bed - Em Cmaj7 G D
-  (room 0.5 (lpf 1400 (gain 0.3
-    (slow 4 (seq
-      (chord e3 :m7)
-      (chord c3 :maj7)
-      (chord g3 :major)
-      (chord d3 :major))))))
-
-  ; shimmering arpeggio
-  (pan -0.3 (room 0.5 (delay 0.4
-    (lpf 3000 (gain 0.35
-      (fast 2 (seq e5 b4 ~ g4 b4 ~ d5 ~)))))))
-
-  ; slow 808 bass - sparse and heavy
-  (drive 0.3 (lpf 180 (comp -24
-    (slow 2 (seq e2 ~ ~ e2 ~ g2 ~ d2)))))
-
-  ; distant pad texture
-  (pan 0.4 (room 0.8
-    (lpq 2 (lpf 800 (gain 0.2
-      (slow 8 (seq
-        [e3, b3] ~ [g3, d4] ~
-        [c3, g3] ~ [d3, a3] ~)))))))
+  ; Shimmering high texture with LFO filter
+  (unison 3 (detune 30
+    (flfo 0.3 (flfoamt 400
+      (adsr 0.5 0.3 0.5 1.0
+        (lpf 4000 (gain 0.12
+          (pan -0.4 (slow 16 (seq
+            b5 ~ e6 ~
+            ~ g5 ~ ~
+            a5 ~ d6 ~
+            ~ f#5 ~ ~))))))))))
 )`;
 
   // Debounced auto-evaluate for live coding
@@ -727,7 +635,6 @@ async function startPlayback() {
       scheduler.start();
       // Start the animation loops
       startHighlightLoop();
-      startPianorollLoop();
       startInlineWidgetLoops();
     } else {
       // Re-evaluate might have set up new widgets
@@ -742,7 +649,6 @@ function stopPlayback() {
   scheduler.stop();
   // Stop the animation loops
   stopHighlightLoop();
-  stopPianorollLoop();
   stopInlineWidgetLoops();
   updateStatus('Stopped');
   document.getElementById('play-btn')!.textContent = 'Play';
@@ -750,6 +656,9 @@ function stopPlayback() {
 
 function evaluateCode() {
   const code = editor.state.doc.toString();
+
+  // Debug: reset WASM tags logging flag so we get fresh logging for each pattern
+  (window as any)._wasmTagsLogged = false;
 
   if (!code.trim()) {
     updateStatus('No code to evaluate');
@@ -808,6 +717,11 @@ function evaluateCode() {
 
       try {
         const events = currentPattern.queryOnsets(start, end) as SoundEvent[];
+        // Debug: log first event's tags once per pattern evaluation
+        if (events.length > 0 && !(window as any)._wasmTagsLogged) {
+          (window as any)._wasmTagsLogged = true;
+          console.log('[WASM] queryOnsets first event:', JSON.stringify(events[0], null, 2));
+        }
         return events;
       } catch (e) {
         console.error('Query error:', e);

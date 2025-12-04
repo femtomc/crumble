@@ -8,6 +8,7 @@
 export type Waveform = 'sine' | 'saw' | 'sawtooth' | 'square' | 'triangle' | 'noise';
 
 export interface EffectMeta {
+  // Effects
   delay?: number;       // Delay time (0-1)
   delayfeedback?: number; // Delay feedback (0-1)
   room?: number;        // Reverb room size (0-1)
@@ -23,6 +24,27 @@ export interface EffectMeta {
   comp_ratio?: number;     // Compressor ratio (1 to 20)
   comp_attack?: number;    // Compressor attack (seconds, 0 to 1)
   comp_release?: number;   // Compressor release (seconds, 0 to 1)
+
+  // ADSR envelope (per-note)
+  attack?: number;      // Attack time (seconds)
+  decay?: number;       // Decay time (seconds)
+  sustain?: number;     // Sustain level (0-1)
+  release?: number;     // Release time (seconds)
+
+  // FM synthesis
+  fm_index?: number;    // FM modulation index (0-100+)
+  fm_ratio?: number;    // Modulator:carrier frequency ratio
+  fm_wave?: string;     // Modulator waveform (sine, saw, square, tri)
+
+  // Multi-oscillator
+  detune?: number;      // Detune in cents
+  unison?: number;      // Number of unison voices (1-8)
+  wave?: string;        // Explicit waveform override
+
+  // Filter modulation
+  filter_env?: number;      // Filter envelope amount (Hz)
+  filter_lfo_rate?: number; // Filter LFO rate (Hz)
+  filter_lfo_amt?: number;  // Filter LFO amount (Hz)
 }
 
 export interface SourceLocation {
@@ -38,6 +60,7 @@ export interface SoundEvent {
   whole_end?: number;
   meta?: Record<string, string>;  // Effect metadata from Rust
   locations?: SourceLocation[];   // Source locations for highlighting
+  tags?: string[];    // Widget tags for filtering (e.g., scope widgets)
 }
 
 export interface AudioEngineOptions {
@@ -63,6 +86,16 @@ export class AudioEngine {
   private reverbNode: ConvolverNode | null = null;
   private reverbSend: GainNode | null = null;
   private reverbBuffer: AudioBuffer | null = null;
+
+  // Audio analyser for oscilloscope visualization (global)
+  private analyserNode: AnalyserNode | null = null;
+  private analyserData: Float32Array<ArrayBuffer> | null = null;
+
+  // Per-scope analysers for filtered visualization
+  private scopeAnalysers = new Map<string, {
+    analyser: AnalyserNode;
+    data: Float32Array<ArrayBuffer>;
+  }>();
 
   constructor(options: AudioEngineOptions = {}) {
     this.options = {
@@ -98,12 +131,85 @@ export class AudioEngine {
     if (!this.masterGain) {
       this.masterGain = this.ctx.createGain();
       this.masterGain.gain.value = this.options.gain;
-      this.masterGain.connect(this.ctx.destination);
+
+      // Initialize analyser for oscilloscope
+      this.initAnalyser();
+
+      // Connect master -> analyser -> destination
+      this.masterGain.connect(this.analyserNode!);
+      this.analyserNode!.connect(this.ctx.destination);
 
       // Initialize effects
       this.initDelay();
       this.initReverb();
     }
+  }
+
+  private initAnalyser(): void {
+    if (!this.ctx) return;
+
+    this.analyserNode = this.ctx.createAnalyser();
+    this.analyserNode.fftSize = 2048; // Gives us 1024 data points
+    this.analyserNode.smoothingTimeConstant = 0; // No smoothing for crisp waveform
+    // Create Float32Array with explicit ArrayBuffer for type compatibility
+    const bufferSize = this.analyserNode.frequencyBinCount;
+    const buffer = new ArrayBuffer(bufferSize * 4); // 4 bytes per float32
+    this.analyserData = new Float32Array(buffer);
+  }
+
+  /**
+   * Get time-domain audio data for oscilloscope visualization.
+   * Returns a Float32Array with values from -1 to 1.
+   */
+  getTimeDomainData(): Float32Array<ArrayBuffer> | null {
+    if (!this.analyserNode || !this.analyserData) return null;
+    this.analyserNode.getFloatTimeDomainData(this.analyserData);
+    return this.analyserData;
+  }
+
+  /**
+   * Get the analyser node for direct access.
+   */
+  get analyser(): AnalyserNode | null {
+    return this.analyserNode;
+  }
+
+  /**
+   * Get or create an analyser for a specific scope widget.
+   * The analyser is not connected to anything yet - sounds must connect to it.
+   */
+  getOrCreateScopeAnalyser(scopeId: string): AnalyserNode {
+    if (!this.ctx) throw new Error('AudioContext not initialized');
+
+    let entry = this.scopeAnalysers.get(scopeId);
+    if (!entry) {
+      const analyser = this.ctx.createAnalyser();
+      analyser.fftSize = 2048;
+      analyser.smoothingTimeConstant = 0;
+      const bufferSize = analyser.frequencyBinCount;
+      const buffer = new ArrayBuffer(bufferSize * 4);
+      const data = new Float32Array(buffer);
+      entry = { analyser, data };
+      this.scopeAnalysers.set(scopeId, entry);
+    }
+    return entry.analyser;
+  }
+
+  /**
+   * Get time-domain data for a specific scope widget.
+   */
+  getScopeTimeDomainData(scopeId: string): Float32Array<ArrayBuffer> | null {
+    const entry = this.scopeAnalysers.get(scopeId);
+    if (!entry) return null;
+    entry.analyser.getFloatTimeDomainData(entry.data);
+    return entry.data;
+  }
+
+  /**
+   * Clear all scope analysers (call when pattern changes).
+   */
+  clearScopeAnalysers(): void {
+    this.scopeAnalysers.clear();
   }
 
   /**
@@ -187,19 +293,28 @@ export class AudioEngine {
 
   /**
    * Play a sound at a specific time with optional effects.
+   * Tags are used to route audio to scope analysers for filtered visualization.
    */
-  playAt(time: number, duration: number, value: string | number, meta?: Record<string, string>): void {
+  playAt(time: number, duration: number, value: string | number, meta?: Record<string, string>, tags?: string[]): void {
     if (!this.ctx || !this.masterGain) return;
 
     const { waveform, freq, isKick } = this.parseValue(value);
     const effects = this.parseEffects(meta);
 
+    // Find scope tags for routing audio to scope analysers
+    const scopeTags = tags?.filter(t => t.startsWith('widget_scope_')) ?? [];
+
+    // Debug: log tags once per distinct set
+    if (tags && tags.length > 0) {
+      console.log(`[audio] playAt tags=${JSON.stringify(tags)}, scopeTags=${JSON.stringify(scopeTags)}`);
+    }
+
     if (waveform === 'noise') {
-      this.playNoise(time, duration, effects);
+      this.playNoise(time, duration, effects, scopeTags);
     } else if (isKick) {
-      this.playKick(time, duration, effects);
+      this.playKick(time, duration, effects, scopeTags);
     } else {
-      this.playTone(time, duration, freq, waveform, effects);
+      this.playTone(time, duration, freq, waveform, effects, scopeTags);
     }
   }
 
@@ -255,8 +370,9 @@ export class AudioEngine {
   /**
    * Build the effect chain for a sound and return the output node.
    * Creates per-event effect sends based on metadata.
+   * Optionally routes audio to scope analysers for filtered visualization.
    */
-  private buildEffectChain(sourceGain: GainNode, time: number, effects: EffectMeta): AudioNode {
+  private buildEffectChain(sourceGain: GainNode, time: number, effects: EffectMeta, scopeTags: string[] = []): AudioNode {
     if (!this.ctx || !this.masterGain) return sourceGain;
 
     let currentNode: AudioNode = sourceGain;
@@ -364,6 +480,13 @@ export class AudioEngine {
       }
     }
 
+    // Route to scope analysers for filtered visualization
+    for (const scopeTag of scopeTags) {
+      const analyser = this.getOrCreateScopeAnalyser(scopeTag);
+      // Connect the final output node to the scope analyser
+      currentNode.connect(analyser);
+    }
+
     return currentNode;
   }
 
@@ -446,45 +569,145 @@ export class AudioEngine {
     }
   }
 
-  private playTone(time: number, duration: number, freq: number, waveform: OscillatorType, effects: EffectMeta = {}): void {
+  private playTone(time: number, duration: number, freq: number, waveform: OscillatorType, effects: EffectMeta = {}, scopeTags: string[] = []): void {
     if (!this.ctx || !this.masterGain) return;
 
-    const osc = this.ctx.createOscillator();
-    const gain = this.ctx.createGain();
+    // Override waveform if specified in effects
+    const actualWave = this.parseWaveform(effects.wave) ?? waveform;
+
+    // ADSR from effects or defaults
+    const attack = effects.attack ?? this.options.attack;
+    const decay = effects.decay ?? this.options.decay;
+    const sustain = effects.sustain ?? this.options.sustain;
+    const release = effects.release ?? this.options.release;
+
+    // Unison voices (1-8)
+    const unisonCount = Math.min(8, Math.max(1, effects.unison ?? 1));
+    const detuneRange = effects.detune ?? 0; // cents
+
+    // Create oscillators for each unison voice
+    const oscillators: OscillatorNode[] = [];
+    const voiceGains: GainNode[] = [];
+    const voiceMixer = this.ctx.createGain();
+    voiceMixer.gain.value = 1 / Math.sqrt(unisonCount); // Normalize volume
+
+    for (let i = 0; i < unisonCount; i++) {
+      const osc = this.ctx.createOscillator();
+      const voiceGain = this.ctx.createGain();
+
+      osc.type = actualWave;
+
+      // Calculate detune for this voice (spread evenly)
+      let detuneCents = 0;
+      if (unisonCount > 1) {
+        const spread = (i / (unisonCount - 1)) * 2 - 1; // -1 to 1
+        detuneCents = spread * detuneRange;
+      }
+      osc.detune.value = detuneCents;
+      osc.frequency.value = freq;
+
+      // FM synthesis: modulate carrier frequency
+      if (effects.fm_index && effects.fm_index > 0) {
+        const fmIndex = effects.fm_index;
+        const fmRatio = effects.fm_ratio ?? 2;
+        const fmWave = this.parseWaveform(effects.fm_wave) ?? 'sine';
+
+        const modulator = this.ctx.createOscillator();
+        const modGain = this.ctx.createGain();
+
+        modulator.type = fmWave;
+        modulator.frequency.value = freq * fmRatio;
+        modGain.gain.value = freq * fmIndex; // FM depth in Hz
+
+        modulator.connect(modGain);
+        modGain.connect(osc.frequency);
+        modulator.start(time);
+        modulator.stop(time + duration + 0.2);
+      }
+
+      voiceGain.gain.value = 1;
+      osc.connect(voiceGain);
+      voiceGain.connect(voiceMixer);
+
+      oscillators.push(osc);
+      voiceGains.push(voiceGain);
+    }
+
+    // Filter setup
     const filter = this.ctx.createBiquadFilter();
-
-    osc.type = waveform;
-    osc.frequency.value = freq;
-
-    // Low-pass filter for warmth (can be overridden by effects.lpf)
     filter.type = 'lowpass';
-    filter.frequency.setValueAtTime(freq * 4, time);
-    filter.frequency.exponentialRampToValueAtTime(freq * 2, time + 0.1);
-    filter.Q.value = 1;
+    const baseCutoff = effects.lpf ?? freq * 4;
+    filter.frequency.setValueAtTime(baseCutoff, time);
+    filter.Q.value = effects.lpq ?? 1;
 
-    // ADSR envelope
-    const { attack, decay, sustain, release } = this.options;
+    // Filter envelope modulation
+    if (effects.filter_env && effects.filter_env !== 0) {
+      const filterEnvAmount = effects.filter_env;
+      const peakCutoff = Math.max(20, Math.min(20000, baseCutoff + filterEnvAmount));
+      // Envelope follows amp envelope shape
+      filter.frequency.setValueAtTime(baseCutoff, time);
+      filter.frequency.linearRampToValueAtTime(peakCutoff, time + attack);
+      filter.frequency.exponentialRampToValueAtTime(
+        baseCutoff + (peakCutoff - baseCutoff) * sustain,
+        time + attack + decay
+      );
+    }
+
+    // Filter LFO modulation
+    if (effects.filter_lfo_rate && effects.filter_lfo_amt) {
+      const lfo = this.ctx.createOscillator();
+      const lfoGain = this.ctx.createGain();
+
+      lfo.type = 'sine';
+      lfo.frequency.value = effects.filter_lfo_rate;
+      lfoGain.gain.value = effects.filter_lfo_amt;
+
+      lfo.connect(lfoGain);
+      lfoGain.connect(filter.frequency);
+      lfo.start(time);
+      lfo.stop(time + duration + 0.2);
+    }
+
+    // Amplitude envelope
+    const gain = this.ctx.createGain();
     const attackEnd = time + attack;
     const decayEnd = attackEnd + decay;
     const releaseStart = time + duration - release;
+    const peakGain = 0.6;
 
     gain.gain.setValueAtTime(0, time);
-    gain.gain.linearRampToValueAtTime(0.6, attackEnd);
-    gain.gain.linearRampToValueAtTime(sustain * 0.6, decayEnd);
-    gain.gain.setValueAtTime(sustain * 0.6, Math.max(decayEnd, releaseStart));
+    gain.gain.linearRampToValueAtTime(peakGain, attackEnd);
+    gain.gain.linearRampToValueAtTime(sustain * peakGain, decayEnd);
+    gain.gain.setValueAtTime(sustain * peakGain, Math.max(decayEnd, releaseStart));
     gain.gain.linearRampToValueAtTime(0, time + duration);
 
-    osc.connect(filter);
+    // Connect: voices -> mixer -> filter -> gain -> effects
+    voiceMixer.connect(filter);
     filter.connect(gain);
 
-    // Apply effect chain
-    this.buildEffectChain(gain, time, effects);
+    // Apply effect chain (with scope routing)
+    this.buildEffectChain(gain, time, effects, scopeTags);
 
-    osc.start(time);
-    osc.stop(time + duration + 0.1);
+    // Start and stop all oscillators
+    oscillators.forEach(osc => {
+      osc.start(time);
+      osc.stop(time + duration + 0.2);
+    });
   }
 
-  private playKick(time: number, duration: number, effects: EffectMeta = {}): void {
+  private parseWaveform(wave: string | undefined): OscillatorType | null {
+    if (!wave) return null;
+    const lower = wave.toLowerCase();
+    switch (lower) {
+      case 'sine': case 'sin': return 'sine';
+      case 'saw': case 'sawtooth': return 'sawtooth';
+      case 'square': case 'sq': case 'pulse': return 'square';
+      case 'tri': case 'triangle': return 'triangle';
+      default: return null;
+    }
+  }
+
+  private playKick(time: number, duration: number, effects: EffectMeta = {}, scopeTags: string[] = []): void {
     if (!this.ctx || !this.masterGain) return;
 
     const osc = this.ctx.createOscillator();
@@ -502,14 +725,14 @@ export class AudioEngine {
 
     osc.connect(gain);
 
-    // Apply effect chain
-    this.buildEffectChain(gain, time, effects);
+    // Apply effect chain (with scope routing)
+    this.buildEffectChain(gain, time, effects, scopeTags);
 
     osc.start(time);
     osc.stop(time + Math.min(duration, 0.3) + 0.1);
   }
 
-  private playNoise(time: number, duration: number, effects: EffectMeta = {}): void {
+  private playNoise(time: number, duration: number, effects: EffectMeta = {}, scopeTags: string[] = []): void {
     if (!this.ctx || !this.masterGain) return;
 
     // Create white noise buffer
@@ -538,8 +761,8 @@ export class AudioEngine {
     source.connect(filter);
     filter.connect(gain);
 
-    // Apply effect chain
-    this.buildEffectChain(gain, time, effects);
+    // Apply effect chain (with scope routing)
+    this.buildEffectChain(gain, time, effects, scopeTags);
 
     source.start(time);
     source.stop(time + duration + 0.1);
@@ -592,6 +815,9 @@ export class PatternScheduler {
   // Scheduled event tracking to avoid duplicates
   private scheduledEvents = new Set<string>();
 
+  // Debug: track which values we've logged (to avoid spam)
+  private debuggedValues?: Set<string>;
+
   constructor(audio: AudioEngine) {
     this.audio = audio;
   }
@@ -639,6 +865,22 @@ export class PatternScheduler {
    */
   get isRunning(): boolean {
     return this.running;
+  }
+
+  /**
+   * Get the current cycle time (for visualization sync).
+   * This accounts for the scheduler's phase tracking and latency compensation.
+   */
+  getCycleTime(): number {
+    if (!this.running) return 0;
+    // Calculate current phase by interpolating from last tick
+    const currentTime = this.audio.currentTime;
+    const elapsed = currentTime - this.lastTickTime;
+    const currentPhase = this.phase + elapsed;
+    // Subtract latency to match what's actually playing now
+    // (audio is scheduled `latency` seconds in the future)
+    const compensatedPhase = Math.max(0, currentPhase - this.latency);
+    return compensatedPhase * this.cps;
   }
 
   private tick = (): void => {
@@ -707,6 +949,16 @@ export class PatternScheduler {
       // Extract source locations for highlighting
       const locations = event instanceof Map ? event.get('locations') : event.locations;
 
+      // Extract tags for scope filtering
+      const tags = event instanceof Map ? event.get('tags') : event.tags;
+
+      // Debug: log raw event to trace tags flow (once per unique value)
+      if (!this.debuggedValues?.has(value)) {
+        if (!this.debuggedValues) this.debuggedValues = new Set();
+        this.debuggedValues.add(value);
+        console.log(`[scheduler] event value=${value}, tags=`, tags, 'isMap=', event instanceof Map, 'event keys=', event instanceof Map ? Array.from(event.keys()) : Object.keys(event));
+      }
+
       // Construct normalized event for callback
       const normalizedEvent: SoundEvent = {
         start,
@@ -716,9 +968,10 @@ export class PatternScheduler {
         whole_end,
         meta,
         locations,
+        tags,
       };
 
-      this.audio.playAt(triggerTime, actualDuration, value, meta);
+      this.audio.playAt(triggerTime, actualDuration, value, meta, tags);
       this.scheduledEvents.add(eventKey);
 
       // Call event callback for UI updates (e.g., highlighting)

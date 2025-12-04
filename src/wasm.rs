@@ -132,6 +132,7 @@ impl JsPattern {
                     "value": value,
                     "meta": meta,
                     "locations": locations,
+                    "tags": hap.context.tags,
                 })
             })
             .collect();
@@ -328,6 +329,7 @@ fn value_to_json(value: &Value) -> serde_json::Value {
         Value::Fraction(f) => serde_json::json!(f.to_f64()),
         Value::Pattern(_) => serde_json::json!("<pattern>"),
         Value::Function(name) => serde_json::json!(format!("<function:{}>", name)),
+        Value::Lambda(params, _, _) => serde_json::json!(format!("<lambda({})>", params.join(", "))),
     }
 }
 

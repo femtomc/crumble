@@ -396,7 +396,7 @@ pub fn tokenize_with_spans(input: &str) -> Result<Vec<SpannedToken>, LispError> 
 }
 
 fn is_symbol_char(c: char) -> bool {
-    c.is_alphanumeric() || matches!(c, '_' | '-' | '+' | '*' | '/' | '!' | '?' | '<' | '>' | '=' | ':' | '.' | '~')
+    c.is_alphanumeric() || matches!(c, '_' | '-' | '+' | '*' | '/' | '!' | '?' | '<' | '>' | '=' | ':' | '.' | '~' | '#')
 }
 
 /// AST node for Lisp expressions.
@@ -625,6 +625,8 @@ pub enum Value {
     Pattern(Pattern<Value>),
     Fraction(Fraction),
     Function(String), // Built-in function name
+    /// User-defined lambda: (params, body, captured_env)
+    Lambda(Vec<String>, Box<Expr>, Box<Env>),
 }
 
 impl fmt::Debug for Value {
@@ -636,6 +638,7 @@ impl fmt::Debug for Value {
             Value::Pattern(_) => write!(f, "Pattern(...)"),
             Value::Fraction(fr) => write!(f, "Fraction({}/{})", fr.numer(), fr.denom()),
             Value::Function(name) => write!(f, "Function({})", name),
+            Value::Lambda(params, _, _) => write!(f, "Lambda({:?})", params),
         }
     }
 }
@@ -662,6 +665,7 @@ impl fmt::Display for Value {
             Value::Pattern(_) => write!(f, "<pattern>"),
             Value::Fraction(fr) => write!(f, "{}/{}", fr.numer(), fr.denom()),
             Value::Function(name) => write!(f, "<fn:{}>", name),
+            Value::Lambda(params, _, _) => write!(f, "<lambda ({})>", params.join(" ")),
         }
     }
 }
@@ -697,7 +701,15 @@ impl Env {
             "lpq", "hpq", "comp", "compressor",
             // Widgets (inline visualizations)
             "pianoroll", "scope", "meter",
+            // Arithmetic
             "+", "-", "*", "/",
+            // Bindings and lambdas
+            "def", "define", "fn", "lambda", "let",
+            // Synthesizer params
+            "attack", "att", "decay", "dec", "sustain", "sus", "release", "rel", "adsr",
+            "fm", "fmratio", "fm-ratio", "fmwave", "fm-wave",
+            "detune", "unison", "wave", "osc",
+            "fenv", "filterenv", "flfo", "filterlfo", "flfoamt", "filterlfoamt",
         ] {
             bindings.insert(name.to_string(), Value::Function(name.to_string()));
         }
@@ -743,6 +755,25 @@ pub fn eval(expr: &Expr, env: &mut Env) -> Result<Value, LispError> {
 
             match func {
                 Value::Function(name) => eval_builtin(&name, args, env),
+                Value::Lambda(params, body, captured_env) => {
+                    // Check arity
+                    if args.len() != params.len() {
+                        return Err(LispError::EvalError(format!(
+                            "Lambda expects {} arguments, got {}",
+                            params.len(),
+                            args.len()
+                        )));
+                    }
+                    // Create new environment from captured env
+                    let mut lambda_env = (*captured_env).clone();
+                    // Bind parameters to evaluated arguments
+                    for (param, arg_expr) in params.iter().zip(args.iter()) {
+                        let arg_val = eval(arg_expr, env)?;
+                        lambda_env.set(param.clone(), arg_val);
+                    }
+                    // Evaluate body in the lambda environment
+                    eval(&body, &mut lambda_env)
+                }
                 _ => Err(LispError::TypeError(format!(
                     "Expected function, got {:?}",
                     func
@@ -1201,6 +1232,141 @@ fn eval_builtin(name: &str, args: &[Expr], env: &mut Env) -> Result<Value, LispE
             }
         }
 
+        // ========================================
+        // Synthesizer parameters
+        // ========================================
+
+        // ADSR envelope
+        "attack" | "att" => {
+            require_args(name, args, 2)?;
+            let val = eval(&args[0], env).and_then(to_f64)?;
+            let pat = eval(&args[1], env).and_then(to_pattern)?;
+            Ok(Value::Pattern(pat.with_meta("attack".to_string(), val.to_string())))
+        }
+
+        "decay" | "dec" => {
+            require_args(name, args, 2)?;
+            let val = eval(&args[0], env).and_then(to_f64)?;
+            let pat = eval(&args[1], env).and_then(to_pattern)?;
+            Ok(Value::Pattern(pat.with_meta("decay".to_string(), val.to_string())))
+        }
+
+        "sustain" | "sus" => {
+            require_args(name, args, 2)?;
+            let val = eval(&args[0], env).and_then(to_f64)?;
+            let pat = eval(&args[1], env).and_then(to_pattern)?;
+            Ok(Value::Pattern(pat.with_meta("sustain".to_string(), val.to_string())))
+        }
+
+        "release" | "rel" => {
+            require_args(name, args, 2)?;
+            let val = eval(&args[0], env).and_then(to_f64)?;
+            let pat = eval(&args[1], env).and_then(to_pattern)?;
+            Ok(Value::Pattern(pat.with_meta("release".to_string(), val.to_string())))
+        }
+
+        // Full ADSR in one: (adsr a d s r pattern)
+        "adsr" => {
+            if args.len() != 5 {
+                return Err(LispError::EvalError(
+                    "adsr requires 5 arguments: (adsr attack decay sustain release pattern)".to_string(),
+                ));
+            }
+            let a = eval(&args[0], env).and_then(to_f64)?;
+            let d = eval(&args[1], env).and_then(to_f64)?;
+            let s = eval(&args[2], env).and_then(to_f64)?;
+            let r = eval(&args[3], env).and_then(to_f64)?;
+            let pat = eval(&args[4], env).and_then(to_pattern)?;
+            let pat = pat.with_meta("attack".to_string(), a.to_string());
+            let pat = pat.with_meta("decay".to_string(), d.to_string());
+            let pat = pat.with_meta("sustain".to_string(), s.to_string());
+            let pat = pat.with_meta("release".to_string(), r.to_string());
+            Ok(Value::Pattern(pat))
+        }
+
+        // FM synthesis
+        "fm" => {
+            // FM index (modulation depth)
+            require_args(name, args, 2)?;
+            let index = eval(&args[0], env).and_then(to_f64)?;
+            let pat = eval(&args[1], env).and_then(to_pattern)?;
+            Ok(Value::Pattern(pat.with_meta("fm_index".to_string(), index.to_string())))
+        }
+
+        "fmratio" | "fm-ratio" => {
+            // Modulator:carrier frequency ratio
+            require_args(name, args, 2)?;
+            let ratio = eval(&args[0], env).and_then(to_f64)?;
+            let pat = eval(&args[1], env).and_then(to_pattern)?;
+            Ok(Value::Pattern(pat.with_meta("fm_ratio".to_string(), ratio.to_string())))
+        }
+
+        "fmwave" | "fm-wave" => {
+            // Modulator waveform: sine, saw, square, tri
+            require_args(name, args, 2)?;
+            let wave = match &args[0] {
+                Expr::Symbol(s) => s.clone(),
+                Expr::String(s) => s.clone(),
+                _ => return Err(LispError::TypeError("fmwave requires a waveform name".to_string())),
+            };
+            let pat = eval(&args[1], env).and_then(to_pattern)?;
+            Ok(Value::Pattern(pat.with_meta("fm_wave".to_string(), wave)))
+        }
+
+        // Multi-oscillator
+        "detune" => {
+            // Detune in cents
+            require_args(name, args, 2)?;
+            let cents = eval(&args[0], env).and_then(to_f64)?;
+            let pat = eval(&args[1], env).and_then(to_pattern)?;
+            Ok(Value::Pattern(pat.with_meta("detune".to_string(), cents.to_string())))
+        }
+
+        "unison" => {
+            // Number of unison voices (1-8)
+            require_args(name, args, 2)?;
+            let voices = eval(&args[0], env).and_then(to_i64)?;
+            let pat = eval(&args[1], env).and_then(to_pattern)?;
+            Ok(Value::Pattern(pat.with_meta("unison".to_string(), voices.to_string())))
+        }
+
+        "wave" | "osc" => {
+            // Set the oscillator waveform explicitly
+            require_args(name, args, 2)?;
+            let wave = match &args[0] {
+                Expr::Symbol(s) => s.clone(),
+                Expr::String(s) => s.clone(),
+                _ => return Err(LispError::TypeError("wave requires a waveform name".to_string())),
+            };
+            let pat = eval(&args[1], env).and_then(to_pattern)?;
+            Ok(Value::Pattern(pat.with_meta("wave".to_string(), wave)))
+        }
+
+        // Filter modulation
+        "fenv" | "filterenv" => {
+            // Filter envelope amount (positive = envelope opens filter)
+            require_args(name, args, 2)?;
+            let amount = eval(&args[0], env).and_then(to_f64)?;
+            let pat = eval(&args[1], env).and_then(to_pattern)?;
+            Ok(Value::Pattern(pat.with_meta("filter_env".to_string(), amount.to_string())))
+        }
+
+        "flfo" | "filterlfo" => {
+            // Filter LFO rate in Hz
+            require_args(name, args, 2)?;
+            let rate = eval(&args[0], env).and_then(to_f64)?;
+            let pat = eval(&args[1], env).and_then(to_pattern)?;
+            Ok(Value::Pattern(pat.with_meta("filter_lfo_rate".to_string(), rate.to_string())))
+        }
+
+        "flfoamt" | "filterlfoamt" => {
+            // Filter LFO amount (how much the LFO affects cutoff)
+            require_args(name, args, 2)?;
+            let amount = eval(&args[0], env).and_then(to_f64)?;
+            let pat = eval(&args[1], env).and_then(to_pattern)?;
+            Ok(Value::Pattern(pat.with_meta("filter_lfo_amt".to_string(), amount.to_string())))
+        }
+
         // Arithmetic (for integer/float values)
         "+" => {
             require_args(name, args, 2)?;
@@ -1258,6 +1424,107 @@ fn eval_builtin(name: &str, args: &[Expr], env: &mut Env) -> Result<Value, LispE
                 (Value::Float(x), Value::Integer(y)) => Ok(Value::Float(x / y as f64)),
                 _ => Err(LispError::TypeError("/ requires numbers".to_string())),
             }
+        }
+
+        // Variable binding: (def name value)
+        "def" | "define" => {
+            if args.len() != 2 {
+                return Err(LispError::EvalError(
+                    "def requires exactly 2 arguments: (def name value)".to_string(),
+                ));
+            }
+            let name = match &args[0] {
+                Expr::Symbol(s) => s.clone(),
+                _ => {
+                    return Err(LispError::TypeError(
+                        "def first argument must be a symbol".to_string(),
+                    ))
+                }
+            };
+            let value = eval(&args[1], env)?;
+            env.set(name.clone(), value.clone());
+            Ok(value)
+        }
+
+        // Lambda: (fn (params...) body) or (lambda (params...) body)
+        "fn" | "lambda" => {
+            if args.len() != 2 {
+                return Err(LispError::EvalError(
+                    "fn requires exactly 2 arguments: (fn (params...) body)".to_string(),
+                ));
+            }
+            // Extract parameter names
+            let params = match &args[0] {
+                Expr::List(param_exprs) => {
+                    let mut params = Vec::new();
+                    for p in param_exprs {
+                        match p {
+                            Expr::Symbol(s) => params.push(s.clone()),
+                            _ => {
+                                return Err(LispError::TypeError(
+                                    "fn parameters must be symbols".to_string(),
+                                ))
+                            }
+                        }
+                    }
+                    params
+                }
+                Expr::Symbol(s) => vec![s.clone()], // Single param without parens
+                _ => {
+                    return Err(LispError::TypeError(
+                        "fn first argument must be a parameter list".to_string(),
+                    ))
+                }
+            };
+            let body = args[1].clone();
+            // Capture the current environment
+            Ok(Value::Lambda(params, Box::new(body), Box::new(env.clone())))
+        }
+
+        // Let binding: (let ((name value) ...) body)
+        "let" => {
+            if args.len() != 2 {
+                return Err(LispError::EvalError(
+                    "let requires exactly 2 arguments: (let ((name value) ...) body)".to_string(),
+                ));
+            }
+            // Create a new environment extending the current one
+            let mut local_env = env.clone();
+
+            // Parse bindings
+            let bindings = match &args[0] {
+                Expr::List(binding_list) => binding_list,
+                _ => {
+                    return Err(LispError::TypeError(
+                        "let first argument must be a list of bindings".to_string(),
+                    ))
+                }
+            };
+
+            for binding in bindings {
+                match binding {
+                    Expr::List(pair) if pair.len() == 2 => {
+                        let name = match &pair[0] {
+                            Expr::Symbol(s) => s.clone(),
+                            _ => {
+                                return Err(LispError::TypeError(
+                                    "let binding name must be a symbol".to_string(),
+                                ))
+                            }
+                        };
+                        let value = eval(&pair[1], &mut local_env)?;
+                        local_env.set(name, value);
+                    }
+                    _ => {
+                        return Err(LispError::EvalError(
+                            "let binding must be (name value)".to_string(),
+                        ))
+                    }
+                }
+            }
+
+            // Evaluate body in the extended environment
+            eval(&args[1], &mut local_env)
         }
 
         _ => Err(LispError::EvalError(format!("Unknown function: {}", name))),
@@ -1643,19 +1910,24 @@ fn eval_widget_builtin(
 
             Ok(Some(Value::Pattern(tagged_pat)))
         }
-        // Scope (waveform) visualization widget
+        // Scope (audio oscilloscope) visualization widget
+        // scope is an audio oscilloscope that shows the waveform of the audio output.
+        // It can be called with no arguments (just shows audio output) or with a pattern
+        // (shows audio output and returns the pattern, useful in stacks).
         "scope" | "_scope" => {
-            if args.is_empty() {
-                return Err(LispError::EvalError("scope requires a pattern argument".to_string()));
-            }
-            let pat = eval_spanned(&args[0], env)?;
-            let pat = to_pattern(pat)?;
-
             // Register the widget
             let widget_id = register_widget("scope", expr_span.start, expr_span.end);
-            let tagged_pat = pat.with_tag(&widget_id);
 
-            Ok(Some(Value::Pattern(tagged_pat)))
+            if args.is_empty() {
+                // No pattern argument - just register widget and return silence
+                Ok(Some(Value::Pattern(silence())))
+            } else {
+                // Pattern argument provided - tag it and return
+                let pat = eval_spanned(&args[0], env)?;
+                let pat = to_pattern(pat)?;
+                let tagged_pat = pat.with_tag(&widget_id);
+                Ok(Some(Value::Pattern(tagged_pat)))
+            }
         }
         // Meter visualization widget
         "meter" | "_meter" => {
