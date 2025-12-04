@@ -21,7 +21,6 @@
     "@lezer/highlight": "^1.2.3",
     "codemirror": "^6.0.2",
     "crumble": "file:../pkg",
-    "vite-plugin-top-level-await": "^1.6.0",
     "vite-plugin-wasm": "^3.5.0"
   }
 }
