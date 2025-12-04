@@ -402,3 +402,18 @@ header .subtitle {
     text-align: center;
   }
 }
+
+/* Pianoroll visualization */
+.pianoroll-container {
+  border: var(--border-thickness) solid var(--text-color);
+  margin-top: 0;
+  background: rgba(0, 0, 0, 0.2);
+  overflow: hidden;
+}
+
+.pianoroll-container canvas {
+  display: block;
+  width: 100%;
+  height: 80px;
+  margin: 0;
+}

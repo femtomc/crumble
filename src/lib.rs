@@ -83,7 +83,7 @@ pub use pattern::{
 };
 pub use state::{ControlValue, State};
 pub use timespan::TimeSpan;
-pub use lisp::{run_lisp, run_lisp_with_locations, Env, Expr, LispError, Span, Token, Value};
+pub use lisp::{run_lisp, run_lisp_with_locations, Env, Expr, LispError, Span, Token, Value, WidgetConfig, get_widget_registry, clear_widget_registry};
 
 // Re-export scheduler data types (always available)
 pub use scheduler::{SchedulerConfig, ScheduledEvent};

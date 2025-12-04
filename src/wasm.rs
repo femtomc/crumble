@@ -6,7 +6,7 @@
 use wasm_bindgen::prelude::*;
 
 use crate::fraction::Fraction;
-use crate::lisp::{run_lisp_with_locations as eval_lisp, Value};
+use crate::lisp::{get_widget_registry, run_lisp_with_locations as eval_lisp, Value};
 use crate::pattern::{self, Pattern};
 use crate::state::State;
 use crate::timespan::TimeSpan;
@@ -52,6 +52,7 @@ impl JsPattern {
                     "value": value,
                     "has_onset": hap.has_onset(),
                     "meta": meta,
+                    "tags": hap.context.tags,
                 })
             })
             .collect();
@@ -63,6 +64,35 @@ impl JsPattern {
     #[wasm_bindgen(js_name = firstCycle)]
     pub fn first_cycle(&self) -> Result<JsValue, JsError> {
         self.query(0.0, 1.0)
+    }
+
+    /// Get all unique source locations from the pattern.
+    /// This queries a few cycles to collect locations for highlighting setup.
+    #[wasm_bindgen(js_name = getAllLocations)]
+    pub fn get_all_locations(&self) -> Result<JsValue, JsError> {
+        // Query a few cycles to collect all unique locations
+        let span = TimeSpan::new(Fraction::from(0.0), Fraction::from(4.0));
+        let state = State::new(span);
+        let haps = self.inner.query(&state);
+
+        // Collect unique locations
+        let mut seen = std::collections::HashSet::new();
+        let mut locations: Vec<serde_json::Value> = Vec::new();
+
+        for hap in haps {
+            for loc in &hap.context.locations {
+                let key = (loc.start, loc.end);
+                if !seen.contains(&key) {
+                    seen.insert(key);
+                    locations.push(serde_json::json!({
+                        "start": loc.start,
+                        "end": loc.end,
+                    }));
+                }
+            }
+        }
+
+        serde_wasm_bindgen::to_value(&locations).map_err(|e| JsError::new(&e.to_string()))
     }
 
     /// Query events with onsets only in a time range.
@@ -174,6 +204,25 @@ pub fn eval_lisp_js(code: &str) -> Result<JsPattern, JsError> {
         Ok(_) => Err(JsError::new("Expression did not evaluate to a pattern")),
         Err(e) => Err(JsError::new(&format!("Lisp error: {}", e))),
     }
+}
+
+/// Get registered widgets after evaluation.
+/// Returns an array of widget configs with type, id, start, and end positions.
+#[wasm_bindgen(js_name = getWidgets)]
+pub fn get_widgets_js() -> Result<JsValue, JsError> {
+    let widgets = get_widget_registry();
+    let js_widgets: Vec<serde_json::Value> = widgets
+        .into_iter()
+        .map(|w| {
+            serde_json::json!({
+                "type": w.widget_type,
+                "id": w.id,
+                "start": w.start,
+                "end": w.end,
+            })
+        })
+        .collect();
+    serde_wasm_bindgen::to_value(&js_widgets).map_err(|e| JsError::new(&e.to_string()))
 }
 
 /// Create a pattern from a single value (string).

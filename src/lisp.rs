@@ -46,8 +46,56 @@
 use crate::fraction::Fraction;
 use crate::hap::Location;
 use crate::pattern::*;
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::fmt;
+
+/// Widget registration for inline visualizations.
+#[derive(Debug, Clone)]
+pub struct WidgetConfig {
+    pub widget_type: String,
+    pub id: String,
+    pub start: usize,
+    pub end: usize,
+}
+
+// Thread-local storage for collecting widget registrations during evaluation
+thread_local! {
+    static WIDGET_REGISTRY: RefCell<Vec<WidgetConfig>> = RefCell::new(Vec::new());
+    static WIDGET_COUNTER: RefCell<usize> = RefCell::new(0);
+}
+
+/// Clear the widget registry (call before evaluation).
+pub fn clear_widget_registry() {
+    WIDGET_REGISTRY.with(|r| r.borrow_mut().clear());
+    WIDGET_COUNTER.with(|c| *c.borrow_mut() = 0);
+}
+
+/// Get all registered widgets (call after evaluation).
+pub fn get_widget_registry() -> Vec<WidgetConfig> {
+    WIDGET_REGISTRY.with(|r| r.borrow().clone())
+}
+
+/// Register a widget and return its unique ID.
+fn register_widget(widget_type: &str, start: usize, end: usize) -> String {
+    let id = WIDGET_COUNTER.with(|c| {
+        let mut counter = c.borrow_mut();
+        let id = *counter;
+        *counter += 1;
+        format!("widget_{}_{}", widget_type, id)
+    });
+
+    WIDGET_REGISTRY.with(|r| {
+        r.borrow_mut().push(WidgetConfig {
+            widget_type: widget_type.to_string(),
+            id: id.clone(),
+            start,
+            end,
+        });
+    });
+
+    id
+}
 
 /// Source span tracking start and end byte offsets.
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
@@ -362,10 +410,27 @@ pub enum Expr {
 }
 
 /// AST node with source location.
+/// This is a full spanned AST - List variants hold spanned children to preserve
+/// source locations throughout the tree.
 #[derive(Debug, Clone, PartialEq)]
-pub struct SpannedExpr {
-    pub expr: Expr,
-    pub span: Span,
+pub enum SpannedExpr {
+    Integer(i64, Span),
+    Float(f64, Span),
+    String(String, Span),
+    Symbol(String, Span),
+    List(Vec<SpannedExpr>, Span),
+}
+
+impl SpannedExpr {
+    pub fn span(&self) -> Span {
+        match self {
+            SpannedExpr::Integer(_, s) => *s,
+            SpannedExpr::Float(_, s) => *s,
+            SpannedExpr::String(_, s) => *s,
+            SpannedExpr::Symbol(_, s) => *s,
+            SpannedExpr::List(_, s) => *s,
+        }
+    }
 }
 
 impl fmt::Display for Expr {
@@ -479,31 +544,19 @@ fn parse_spanned_expr(tokens: &[SpannedToken], pos: &mut usize) -> Result<Spanne
     match &tokens[*pos].token {
         Token::Integer(n) => {
             *pos += 1;
-            Ok(SpannedExpr {
-                expr: Expr::Integer(*n),
-                span: start_span,
-            })
+            Ok(SpannedExpr::Integer(*n, start_span))
         }
         Token::Float(n) => {
             *pos += 1;
-            Ok(SpannedExpr {
-                expr: Expr::Float(*n),
-                span: start_span,
-            })
+            Ok(SpannedExpr::Float(*n, start_span))
         }
         Token::String(s) => {
             *pos += 1;
-            Ok(SpannedExpr {
-                expr: Expr::String(s.clone()),
-                span: start_span,
-            })
+            Ok(SpannedExpr::String(s.clone(), start_span))
         }
         Token::Symbol(s) => {
             *pos += 1;
-            Ok(SpannedExpr {
-                expr: Expr::Symbol(s.clone()),
-                span: start_span,
-            })
+            Ok(SpannedExpr::Symbol(s.clone(), start_span))
         }
         Token::LParen => {
             *pos += 1; // consume (
@@ -516,18 +569,12 @@ fn parse_spanned_expr(tokens: &[SpannedToken], pos: &mut usize) -> Result<Spanne
             }
             let end_span = tokens[*pos].span;
             *pos += 1; // consume )
-            Ok(SpannedExpr {
-                expr: Expr::List(items.iter().map(|e| e.expr.clone()).collect()),
-                span: Span::new(start_span.start, end_span.end),
-            })
+            Ok(SpannedExpr::List(items, Span::new(start_span.start, end_span.end)))
         }
         Token::LBracket => {
             // [a, b, c] is sugar for (stack a b c)
             *pos += 1; // consume [
-            let mut items = vec![SpannedExpr {
-                expr: Expr::Symbol("stack".to_string()),
-                span: start_span,
-            }];
+            let mut items = vec![SpannedExpr::Symbol("stack".to_string(), start_span)];
             while *pos < tokens.len() && tokens[*pos].token != Token::RBracket {
                 // Skip commas
                 if tokens[*pos].token == Token::Comma {
@@ -541,10 +588,7 @@ fn parse_spanned_expr(tokens: &[SpannedToken], pos: &mut usize) -> Result<Spanne
             }
             let end_span = tokens[*pos].span;
             *pos += 1; // consume ]
-            Ok(SpannedExpr {
-                expr: Expr::List(items.iter().map(|e| e.expr.clone()).collect()),
-                span: Span::new(start_span.start, end_span.end),
-            })
+            Ok(SpannedExpr::List(items, Span::new(start_span.start, end_span.end)))
         }
         Token::RParen => Err(LispError::ParseError("Unexpected ')'".to_string())),
         Token::RBracket => Err(LispError::ParseError("Unexpected ']'".to_string())),
@@ -651,6 +695,8 @@ impl Env {
             "delay", "delaytime", "delayfeedback", "room", "size",
             "drive", "saturation", "gain", "pan", "lpf", "hpf",
             "lpq", "hpq", "comp", "compressor",
+            // Widgets (inline visualizations)
+            "pianoroll", "scope", "meter",
             "+", "-", "*", "/",
         ] {
             bindings.insert(name.to_string(), Value::Function(name.to_string()));
@@ -1381,7 +1427,11 @@ pub fn run_lisp(input: &str) -> Result<Value, LispError> {
 
 /// Parse and evaluate with source location tracking.
 /// Returns a Pattern<Value> with source locations attached for highlighting.
+/// Also populates the widget registry (call `get_widget_registry()` after).
 pub fn run_lisp_with_locations(input: &str) -> Result<Value, LispError> {
+    // Clear widget registry before evaluation
+    clear_widget_registry();
+
     let tokens = tokenize_with_spans(input)?;
     let expr = parse_spanned(&tokens)?;
     let mut env = Env::new();
@@ -1390,14 +1440,14 @@ pub fn run_lisp_with_locations(input: &str) -> Result<Value, LispError> {
 
 /// Evaluate a spanned expression, attaching source locations to patterns.
 fn eval_spanned(expr: &SpannedExpr, env: &mut Env) -> Result<Value, LispError> {
-    let span = expr.span;
+    let span = expr.span();
     let location = span.to_location();
 
-    match &expr.expr {
-        Expr::Integer(n) => Ok(Value::Integer(*n)),
-        Expr::Float(n) => Ok(Value::Float(*n)),
-        Expr::String(s) => Ok(Value::String(s.clone())),
-        Expr::Symbol(s) => {
+    match expr {
+        SpannedExpr::Integer(n, _) => Ok(Value::Integer(*n)),
+        SpannedExpr::Float(n, _) => Ok(Value::Float(*n)),
+        SpannedExpr::String(s, _) => Ok(Value::String(s.clone())),
+        SpannedExpr::Symbol(s, _) => {
             // Special case: ~ means silence/rest
             if s == "~" {
                 return Ok(Value::Pattern(silence().with_location(location)));
@@ -1410,21 +1460,30 @@ fn eval_spanned(expr: &SpannedExpr, env: &mut Env) -> Result<Value, LispError> {
                 }
             } else {
                 // Treat unknown symbols as string values (like note names)
-                // These become patterns, so attach location
-                Ok(Value::String(s.clone()))
+                // These become patterns with location attached
+                let pat = pure(Value::String(s.clone())).with_location(location);
+                Ok(Value::Pattern(pat))
             }
         }
-        Expr::List(items) => {
+        SpannedExpr::List(items, list_span) => {
             if items.is_empty() {
                 return Err(LispError::EvalError("Empty list".to_string()));
             }
 
-            // Get the function
-            let func = eval(&items[0], env)?;
+            // Get the function name
+            let func = eval_spanned(&items[0], env)?;
             let args = &items[1..];
 
             let result = match func {
-                Value::Function(name) => eval_builtin(&name, args, env),
+                Value::Function(name) => {
+                    // First check if this is a widget builtin
+                    if let Some(val) = eval_widget_builtin(&name, args, *list_span, env)? {
+                        Ok(val)
+                    } else {
+                        // Regular builtin
+                        eval_builtin_spanned(&name, args, env)
+                    }
+                }
                 _ => Err(LispError::TypeError(format!(
                     "Expected function, got {:?}",
                     func
@@ -1437,6 +1496,192 @@ fn eval_spanned(expr: &SpannedExpr, env: &mut Env) -> Result<Value, LispError> {
                 other => Ok(other),
             }
         }
+    }
+}
+
+/// Evaluate a builtin function with spanned arguments to preserve source locations.
+fn eval_builtin_spanned(name: &str, args: &[SpannedExpr], env: &mut Env) -> Result<Value, LispError> {
+    match name {
+        // Pattern constructors that need location tracking
+        "seq" | "sequence" => {
+            let patterns: Result<Vec<Pattern<Value>>, _> = args
+                .iter()
+                .map(|arg| {
+                    let val = eval_spanned(arg, env)?;
+                    to_pattern(val)
+                })
+                .collect();
+            Ok(Value::Pattern(sequence(patterns?)))
+        }
+        "stack" => {
+            let patterns: Result<Vec<Pattern<Value>>, _> = args
+                .iter()
+                .map(|arg| {
+                    let val = eval_spanned(arg, env)?;
+                    to_pattern(val)
+                })
+                .collect();
+            Ok(Value::Pattern(stack(patterns?)))
+        }
+        "cat" => {
+            let patterns: Result<Vec<Pattern<Value>>, _> = args
+                .iter()
+                .map(|arg| {
+                    let val = eval_spanned(arg, env)?;
+                    to_pattern(val)
+                })
+                .collect();
+            Ok(Value::Pattern(cat(patterns?)))
+        }
+        // Transformations with 1 numeric arg + pattern (time-based)
+        "fast" | "slow" | "early" | "late" => {
+            if args.len() != 2 {
+                return Err(LispError::EvalError(format!("{} requires 2 arguments", name)));
+            }
+            let n = eval_spanned(&args[0], env)?;
+            let pat = eval_spanned(&args[1], env)?;
+            let pat = to_pattern(pat)?;
+
+            let result = match name {
+                "fast" => pat.fast(to_fraction(n)?),
+                "slow" => pat.slow(to_fraction(n)?),
+                "early" => pat.early(to_fraction(n)?),
+                "late" => pat.late(to_fraction(n)?),
+                _ => unreachable!(),
+            };
+            Ok(Value::Pattern(result))
+        }
+        // Ply transformation
+        "ply" => {
+            if args.len() != 2 {
+                return Err(LispError::EvalError("ply requires 2 arguments".to_string()));
+            }
+            let n = eval_spanned(&args[0], env)?;
+            let pat = eval_spanned(&args[1], env)?;
+            let pat = to_pattern(pat)?;
+            let i = match n {
+                Value::Integer(i) => i,
+                Value::Float(f) => f as i64,
+                _ => return Err(LispError::TypeError("ply requires integer".to_string())),
+            };
+            Ok(Value::Pattern(pat.ply(i)))
+        }
+        // Effect transformations (add metadata)
+        "delay" | "room" | "drive" | "lpf" | "hpf" | "lpq" | "hpq" | "pan" | "gain" => {
+            if args.len() != 2 {
+                return Err(LispError::EvalError(format!("{} requires 2 arguments", name)));
+            }
+            let amount = to_f64(eval_spanned(&args[0], env)?)?;
+            let pat = eval_spanned(&args[1], env)?;
+            let pat = to_pattern(pat)?;
+            Ok(Value::Pattern(pat.with_meta(name.to_string(), amount.to_string())))
+        }
+        // Transformations with just a pattern
+        "rev" | "palindrome" => {
+            if args.len() != 1 {
+                return Err(LispError::EvalError(format!("{} requires 1 argument", name)));
+            }
+            let pat = eval_spanned(&args[0], env)?;
+            let pat = to_pattern(pat)?;
+            let result = match name {
+                "rev" => pat.rev(),
+                "palindrome" => pat.palindrome(),
+                _ => unreachable!(),
+            };
+            Ok(Value::Pattern(result))
+        }
+        // Euclidean rhythm
+        "euclid" => {
+            if args.len() != 3 {
+                return Err(LispError::EvalError("euclid requires 3 arguments".to_string()));
+            }
+            let k_val = eval_spanned(&args[0], env)?;
+            let n_val = eval_spanned(&args[1], env)?;
+            let val = eval_spanned(&args[2], env)?;
+            let k = match k_val {
+                Value::Integer(i) => i,
+                Value::Float(f) => f as i64,
+                _ => return Err(LispError::TypeError("euclid k must be integer".to_string())),
+            };
+            let n = match n_val {
+                Value::Integer(i) => i,
+                Value::Float(f) => f as i64,
+                _ => return Err(LispError::TypeError("euclid n must be integer".to_string())),
+            };
+            Ok(Value::Pattern(euclid(k, n, val)))
+        }
+        // For other builtins, convert to Expr and use the regular evaluator
+        _ => {
+            let exprs: Vec<Expr> = args.iter().map(spanned_to_expr).collect();
+            eval_builtin(name, &exprs, env)
+        }
+    }
+}
+
+/// Evaluate widget builtins that need span information for positioning.
+/// Returns (pattern, widget_registered) where widget_registered indicates if a widget was created.
+fn eval_widget_builtin(
+    name: &str,
+    args: &[SpannedExpr],
+    expr_span: Span,
+    env: &mut Env,
+) -> Result<Option<Value>, LispError> {
+    match name {
+        // Pianoroll visualization widget
+        "pianoroll" | "_pianoroll" => {
+            if args.is_empty() {
+                return Err(LispError::EvalError("pianoroll requires a pattern argument".to_string()));
+            }
+            let pat = eval_spanned(&args[0], env)?;
+            let pat = to_pattern(pat)?;
+
+            // Register the widget with its source position
+            let widget_id = register_widget("pianoroll", expr_span.start, expr_span.end);
+
+            // Tag the pattern with the widget ID so events can be filtered
+            let tagged_pat = pat.with_tag(&widget_id);
+
+            Ok(Some(Value::Pattern(tagged_pat)))
+        }
+        // Scope (waveform) visualization widget
+        "scope" | "_scope" => {
+            if args.is_empty() {
+                return Err(LispError::EvalError("scope requires a pattern argument".to_string()));
+            }
+            let pat = eval_spanned(&args[0], env)?;
+            let pat = to_pattern(pat)?;
+
+            // Register the widget
+            let widget_id = register_widget("scope", expr_span.start, expr_span.end);
+            let tagged_pat = pat.with_tag(&widget_id);
+
+            Ok(Some(Value::Pattern(tagged_pat)))
+        }
+        // Meter visualization widget
+        "meter" | "_meter" => {
+            if args.is_empty() {
+                return Err(LispError::EvalError("meter requires a pattern argument".to_string()));
+            }
+            let pat = eval_spanned(&args[0], env)?;
+            let pat = to_pattern(pat)?;
+
+            let widget_id = register_widget("meter", expr_span.start, expr_span.end);
+            let tagged_pat = pat.with_tag(&widget_id);
+
+            Ok(Some(Value::Pattern(tagged_pat)))
+        }
+        _ => Ok(None), // Not a widget builtin
+    }
+}
+
+/// Convert a SpannedExpr back to Expr (loses span info, used for builtins that don't need it)
+fn spanned_to_expr(expr: &SpannedExpr) -> Expr {
+    match expr {
+        SpannedExpr::Integer(n, _) => Expr::Integer(*n),
+        SpannedExpr::Float(n, _) => Expr::Float(*n),
+        SpannedExpr::String(s, _) => Expr::String(s.clone()),
+        SpannedExpr::Symbol(s, _) => Expr::Symbol(s.clone()),
+        SpannedExpr::List(items, _) => Expr::List(items.iter().map(spanned_to_expr).collect()),
     }
 }
 
@@ -1471,6 +1716,52 @@ mod tests {
     fn test_tokenize_nested() {
         let tokens = tokenize("(fast 2 (seq 1 2 3))").unwrap();
         assert_eq!(tokens.len(), 10);
+    }
+
+    #[test]
+    fn test_tokenize_with_spans_tilde() {
+        // Test that ~ is tokenized correctly in spanned tokenizer
+        let tokens = tokenize_with_spans("(seq a ~ b)").unwrap();
+        assert_eq!(tokens.len(), 6); // ( seq a ~ b )
+        // Check that ~ is a symbol
+        assert!(matches!(&tokens[3].token, Token::Symbol(s) if s == "~"));
+    }
+
+    #[test]
+    fn test_run_lisp_with_locations_tilde() {
+        // Test that ~ works in the spanned evaluator
+        let result = run_lisp_with_locations("(seq a ~ b)");
+        assert!(result.is_ok(), "Expected Ok, got {:?}", result);
+    }
+
+    #[test]
+    fn test_locations_are_attached_to_haps() {
+        // Test that source locations are properly attached to events
+        let code = "(seq a b c)";
+        let result = run_lisp_with_locations(code).expect("Should parse");
+        if let Value::Pattern(pat) = result {
+            let haps = pat.first_cycle();
+            assert_eq!(haps.len(), 3, "Should have 3 events");
+
+            // Each event should have locations attached
+            for (i, hap) in haps.iter().enumerate() {
+                assert!(
+                    !hap.context.locations.is_empty(),
+                    "Event {} should have locations, but got: {:?}",
+                    i,
+                    hap.context
+                );
+            }
+
+            // First event (value 'a') should point to the 'a' in source
+            // (seq a b c)
+            //      ^ position 5
+            let first_loc = &haps[0].context.locations[0];
+            assert_eq!(first_loc.start, 5, "First location should start at position 5");
+            assert_eq!(first_loc.end, 6, "First location should end at position 6");
+        } else {
+            panic!("Expected pattern");
+        }
     }
 
     #[test]

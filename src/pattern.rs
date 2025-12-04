@@ -269,6 +269,18 @@ impl<T: Clone + Send + Sync + 'static> Pattern<T> {
         })
     }
 
+    /// Add a tag to all haps.
+    /// Tags are used to identify events for filtering (e.g., for widgets).
+    pub fn with_tag(self, tag: &str) -> Self {
+        let tag = tag.to_string();
+        self.with_hap(move |mut hap| {
+            if !hap.context.tags.contains(&tag) {
+                hap.context.tags.push(tag.clone());
+            }
+            hap
+        })
+    }
+
     /// Add a source location to all haps.
     /// This is used for highlighting active events in the editor.
     pub fn with_location(self, location: crate::hap::Location) -> Self {

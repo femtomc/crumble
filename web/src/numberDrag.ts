@@ -15,11 +15,10 @@ function findNumbers(view: EditorView): DecorationSet {
   const builder = new RangeSetBuilder<Decoration>();
   const doc = view.state.doc;
 
-  // Regex to match integers and floats (including negative)
-  const numberRegex = /-?\d+\.?\d*/g;
-
   for (let i = 1; i <= doc.lines; i++) {
     const line = doc.line(i);
+    // Create a fresh regex for each line to avoid state issues
+    const numberRegex = /-?\d+\.?\d*/g;
     let match;
     while ((match = numberRegex.exec(line.text)) !== null) {
       const from = line.from + match.index;
@@ -44,8 +43,19 @@ let dragState: {
 // Handle mouse events
 function handleMouseDown(e: MouseEvent, view: EditorView): boolean {
   // Check if we're clicking on a draggable number
-  const target = e.target as HTMLElement;
-  if (!target.classList.contains('cm-number-draggable')) {
+  // The target might be the span itself or a child text node
+  let target = e.target as HTMLElement;
+
+  // Walk up to find the decorated span
+  while (target && !target.classList?.contains('cm-number-draggable')) {
+    if (target.parentElement) {
+      target = target.parentElement;
+    } else {
+      break;
+    }
+  }
+
+  if (!target?.classList?.contains('cm-number-draggable')) {
     return false;
   }
 

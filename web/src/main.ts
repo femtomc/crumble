@@ -4,19 +4,36 @@ import type { ViewUpdate } from '@codemirror/view';
 import { HighlightStyle, syntaxHighlighting, StreamLanguage } from '@codemirror/language';
 import { tags } from '@lezer/highlight';
 import { scheme } from '@codemirror/legacy-modes/mode/scheme';
-import init, { evalLisp, JsPattern } from 'crumble';
+import init, { evalLisp, getWidgets, JsPattern } from 'crumble';
 import { AudioEngine, PatternScheduler } from './audio';
-import type { SoundEvent, SourceLocation } from './audio';
+import type { SoundEvent } from './audio';
 import { OfflineRenderer, encodeWAV, downloadBlob, formatDuration } from './export';
 import { numberDragPlugin, numberDragTheme } from './numberDrag';
 import {
-  activeLocationsField,
-  eventHighlightPlugin,
-  eventHighlightTheme,
-  highlightEvents,
+  highlightExtension,
+  updateAllLocations,
+  highlightActiveHaps,
   clearHighlights,
+  type SourceLocation as HighlightLocation,
+  type ActiveHap,
 } from './eventHighlight';
+import { drawPianoroll, type PianorollHap } from './pianoroll';
+import { drawScope, type ScopeHap } from './scope';
+import {
+  widgetExtension,
+  updateWidgets,
+  getCanvasWidget,
+  type WidgetConfig,
+} from './widgets';
 import './style.css';
+
+// Widget type from WASM
+interface WasmWidgetConfig {
+  type: 'pianoroll' | 'scope' | 'meter';
+  id: string;
+  start: number;
+  end: number;
+}
 
 // Debounce helper
 function debounce<T extends (...args: unknown[]) => void>(fn: T, delay: number): T {
@@ -104,9 +121,26 @@ let scheduler: PatternScheduler;
 let currentPattern: JsPattern | null = null;
 let editor: EditorView;
 
-// Active highlights tracking
-const activeHighlights = new Map<number, SourceLocation[]>();
-let highlightIdCounter = 0;
+// Active highlights tracking - stores haps with their scheduled times
+const activeHaps = new Map<number, { hap: ActiveHap; endTime: number }>();
+let hapIdCounter = 0;
+let highlightFrameId: number | null = null;
+
+// Pianoroll state
+let pianorollCanvas: HTMLCanvasElement | null = null;
+let pianorollCtx: CanvasRenderingContext2D | null = null;
+let pianorollFrameId: number | null = null;
+let pianorollHaps: PianorollHap[] = [];
+
+// Inline widget state
+interface InlineWidget {
+  id: string;
+  type: string;
+  canvas: HTMLCanvasElement;
+  ctx: CanvasRenderingContext2D;
+  frameId: number | null;
+}
+const inlineWidgets = new Map<string, InlineWidget>();
 
 // Initialize WASM and audio
 async function initApp() {
@@ -119,52 +153,336 @@ async function initApp() {
   scheduler = new PatternScheduler(audio);
   scheduler.cps = 0.5; // Default tempo
 
-  // Set up event highlighting callback
+  // Set up event callback to collect haps for highlighting
   scheduler.onEvent = (event, triggerTime, duration) => {
-    if (!event.locations || event.locations.length === 0 || !editor) return;
+    if (!editor || !event.locations || event.locations.length === 0) return;
 
-    // Calculate delay until the event actually plays
+    // Store this hap with its end time
+    const hapId = hapIdCounter++;
+    const endTime = triggerTime + Math.min(duration, 0.2); // Max 200ms highlight
+
+    activeHaps.set(hapId, {
+      hap: {
+        whole_start: event.whole_start,
+        whole_end: event.whole_end,
+        locations: event.locations,
+        value: event.value,
+      },
+      endTime,
+    });
+
+    // Schedule removal
     const now = audio.currentTime;
-    const delay = Math.max(0, (triggerTime - now) * 1000);
-
-    // Store this highlight with a unique ID
-    const highlightId = highlightIdCounter++;
-    const locations = event.locations;
-
-    // Schedule the highlight to appear when the event plays
+    const removeDelay = Math.max(0, (endTime - now) * 1000);
     setTimeout(() => {
-      activeHighlights.set(highlightId, locations);
-      updateHighlights();
-    }, delay);
-
-    // Schedule the highlight to disappear after a short duration
-    const highlightDuration = Math.min(duration * 1000, 200); // Max 200ms visual highlight
-    setTimeout(() => {
-      activeHighlights.delete(highlightId);
-      updateHighlights();
-    }, delay + highlightDuration);
+      activeHaps.delete(hapId);
+    }, removeDelay);
   };
 
   // Set up UI
   setupUI();
   setupEditor();
+  setupPianoroll();
   setupControls();
 
   // Update status
   updateStatus('Ready. Press Ctrl+Enter to evaluate.');
 }
 
-// Update the editor with all active highlights
-function updateHighlights() {
-  if (!editor) return;
+// Start the highlight animation frame loop
+function startHighlightLoop() {
+  if (highlightFrameId !== null) return;
 
-  // Collect all unique locations from active highlights
-  const allLocations: SourceLocation[] = [];
-  for (const locations of activeHighlights.values()) {
-    allLocations.push(...locations);
+  const updateFrame = () => {
+    if (!editor) return;
+
+    const now = audio.currentTime;
+
+    // Filter to only currently active haps
+    const currentHaps: ActiveHap[] = [];
+    for (const { hap, endTime } of activeHaps.values()) {
+      if (now < endTime) {
+        currentHaps.push(hap);
+      }
+    }
+
+    // Update highlights
+    highlightActiveHaps(editor, now, currentHaps);
+
+    highlightFrameId = requestAnimationFrame(updateFrame);
+  };
+
+  highlightFrameId = requestAnimationFrame(updateFrame);
+}
+
+// Stop the highlight animation frame loop
+function stopHighlightLoop() {
+  if (highlightFrameId !== null) {
+    cancelAnimationFrame(highlightFrameId);
+    highlightFrameId = null;
+  }
+  activeHaps.clear();
+  if (editor) {
+    clearHighlights(editor);
+  }
+}
+
+// Set up the pianoroll canvas
+function setupPianoroll() {
+  pianorollCanvas = document.getElementById('pianoroll') as HTMLCanvasElement;
+  if (!pianorollCanvas) return;
+
+  const container = pianorollCanvas.parentElement!;
+  const pixelRatio = window.devicePixelRatio || 1;
+
+  // Size the canvas to fit container
+  const resize = () => {
+    if (!pianorollCanvas) return;
+    const width = container.clientWidth;
+    const height = 80;
+    pianorollCanvas.width = width * pixelRatio;
+    pianorollCanvas.height = height * pixelRatio;
+    pianorollCanvas.style.width = `${width}px`;
+    pianorollCanvas.style.height = `${height}px`;
+  };
+
+  resize();
+  window.addEventListener('resize', resize);
+
+  pianorollCtx = pianorollCanvas.getContext('2d');
+}
+
+// Start the pianoroll animation loop
+function startPianorollLoop() {
+  if (pianorollFrameId !== null || !pianorollCtx || !currentPattern) return;
+
+  const cycles = 4;
+  const playhead = 0.5;
+
+  const animate = () => {
+    if (!pianorollCtx || !currentPattern || !scheduler.isRunning) {
+      pianorollFrameId = null;
+      return;
+    }
+
+    const time = audio.currentTime;
+
+    // Query haps for visible time range
+    const from = time - cycles * playhead;
+    const to = time + cycles * (1 - playhead);
+
+    try {
+      // Query all events (not just onsets) for visualization
+      const events = currentPattern.query(from, to) as PianorollHap[];
+      pianorollHaps = events;
+    } catch (e) {
+      // Ignore query errors
+    }
+
+    // Draw the pianoroll
+    drawPianoroll(pianorollCtx, time, pianorollHaps, {
+      cycles,
+      playhead,
+      fold: true,
+      autorange: true,
+      active: '#FFCA28',
+      inactive: 'rgba(116, 145, 210, 0.6)',
+      playheadColor: 'rgba(255, 255, 255, 0.8)',
+    });
+
+    pianorollFrameId = requestAnimationFrame(animate);
+  };
+
+  pianorollFrameId = requestAnimationFrame(animate);
+}
+
+// Stop the pianoroll animation loop
+function stopPianorollLoop() {
+  if (pianorollFrameId !== null) {
+    cancelAnimationFrame(pianorollFrameId);
+    pianorollFrameId = null;
   }
 
-  highlightEvents(editor, allLocations);
+  // Clear the canvas
+  if (pianorollCtx && pianorollCanvas) {
+    pianorollCtx.clearRect(0, 0, pianorollCanvas.width, pianorollCanvas.height);
+  }
+}
+
+// Set up inline widgets from WASM widget registry
+function setupInlineWidgets(wasmWidgets: WasmWidgetConfig[]) {
+  // Convert WASM widget configs to CodeMirror widget configs
+  const cmConfigs: WidgetConfig[] = wasmWidgets.map((w, index) => {
+    // Pre-create the canvas for this widget
+    const canvas = getCanvasWidget(`widget_${w.type}_${index}`, {
+      width: 400,
+      height: 60,
+    });
+
+    // Store widget state
+    const ctx = canvas.getContext('2d');
+    if (ctx) {
+      inlineWidgets.set(w.id, {
+        id: w.id,
+        type: w.type,
+        canvas,
+        ctx,
+        frameId: null,
+      });
+    }
+
+    return {
+      type: w.type,
+      to: w.end, // Position widget after the expression
+    };
+  });
+
+  // Update CodeMirror decorations
+  if (cmConfigs.length > 0) {
+    updateWidgets(editor, cmConfigs);
+  }
+}
+
+// Start animation loops for all inline widgets
+function startInlineWidgetLoops() {
+  for (const widget of inlineWidgets.values()) {
+    if (widget.frameId !== null) continue;
+    if (widget.type === 'pianoroll') {
+      startInlinePianorollLoop(widget);
+    } else if (widget.type === 'scope') {
+      startInlineScopeLoop(widget);
+    }
+    // TODO: Add meter loop
+  }
+}
+
+// Start a pianoroll animation for an inline widget
+function startInlinePianorollLoop(widget: InlineWidget) {
+  const cycles = 4;
+  const playhead = 0.5;
+
+  const animate = () => {
+    if (!currentPattern || !scheduler.isRunning) {
+      widget.frameId = null;
+      return;
+    }
+
+    const time = audio.currentTime;
+    const from = time - cycles * playhead;
+    const to = time + cycles * (1 - playhead);
+
+    try {
+      const rawEvents = currentPattern.query(from, to) as unknown[];
+      // WASM returns Maps, convert to plain objects and filter by widget tag
+      const allEvents = rawEvents.map((e: unknown) => {
+        if (e instanceof Map) {
+          return {
+            start: e.get('start') as number,
+            end: e.get('end') as number,
+            whole_start: e.get('whole_start') as number | undefined,
+            whole_end: e.get('whole_end') as number | undefined,
+            value: e.get('value'),
+            tags: e.get('tags') as string[] | undefined,
+          };
+        }
+        return e as PianorollHap & { tags?: string[] };
+      });
+
+      // Filter by widget tag if tags are available
+      const events: PianorollHap[] = allEvents.filter((e) => {
+        // If no tags, include all events (fallback behavior)
+        if (!e.tags || e.tags.length === 0) return true;
+        return e.tags.includes(widget.id);
+      });
+
+      drawPianoroll(widget.ctx, time, events, {
+        cycles,
+        playhead,
+        fold: true,
+        autorange: true,
+        active: '#FFCA28',
+        inactive: 'rgba(116, 145, 210, 0.6)',
+        playheadColor: 'rgba(255, 255, 255, 0.8)',
+      });
+    } catch (e) {
+      // Ignore query errors
+    }
+
+    widget.frameId = requestAnimationFrame(animate);
+  };
+
+  widget.frameId = requestAnimationFrame(animate);
+}
+
+// Start a scope animation for an inline widget
+function startInlineScopeLoop(widget: InlineWidget) {
+  const cycles = 4;
+  const playhead = 0.5;
+
+  const animate = () => {
+    if (!currentPattern || !scheduler.isRunning) {
+      widget.frameId = null;
+      return;
+    }
+
+    const time = audio.currentTime;
+    const from = time - cycles * playhead;
+    const to = time + cycles * (1 - playhead);
+
+    try {
+      const rawEvents = currentPattern.query(from, to) as unknown[];
+      // WASM returns Maps, convert to plain objects and filter by widget tag
+      const events: ScopeHap[] = rawEvents
+        .map((e: unknown) => {
+          if (e instanceof Map) {
+            return {
+              start: e.get('start') as number,
+              end: e.get('end') as number,
+              whole_start: e.get('whole_start') as number | undefined,
+              whole_end: e.get('whole_end') as number | undefined,
+              value: e.get('value'),
+              tags: e.get('tags') as string[] | undefined,
+            };
+          }
+          return e as ScopeHap & { tags?: string[] };
+        })
+        .filter((e) => {
+          // If no tags, include all events (fallback behavior)
+          if (!e.tags || e.tags.length === 0) return true;
+          return e.tags.includes(widget.id);
+        });
+
+      drawScope(widget.ctx, time, events, {
+        cycles,
+        playhead,
+        autorange: true,
+        bipolar: false,
+        fill: true,
+        dots: true,
+        activeColor: '#00FFAA',
+        inactiveColor: 'rgba(68, 136, 170, 0.6)',
+        playheadColor: 'rgba(255, 255, 255, 0.8)',
+      });
+    } catch (e) {
+      // Ignore query errors
+    }
+
+    widget.frameId = requestAnimationFrame(animate);
+  };
+
+  widget.frameId = requestAnimationFrame(animate);
+}
+
+// Stop all inline widget animation loops
+function stopInlineWidgetLoops() {
+  for (const widget of inlineWidgets.values()) {
+    if (widget.frameId !== null) {
+      cancelAnimationFrame(widget.frameId);
+      widget.frameId = null;
+    }
+    // Clear the canvas
+    widget.ctx.clearRect(0, 0, widget.canvas.width, widget.canvas.height);
+  }
 }
 
 function setupUI() {
@@ -199,6 +517,10 @@ function setupUI() {
 
       <div id="editor" class="editor"></div>
 
+      <div id="pianoroll-container" class="pianoroll-container">
+        <canvas id="pianoroll"></canvas>
+      </div>
+
       <div class="status-bar">
         <span id="status">Loading...</span>
         <span class="shortcuts">Ctrl+Enter: evaluate | Ctrl+.: stop</span>
@@ -231,6 +553,11 @@ function setupUI() {
           <li><code>(hpf hz pat)</code> - high-pass filter</li>
           <li><code>(pan pos pat)</code> - stereo pan (-1 to 1)</li>
         </ul>
+        <h3>Widgets</h3>
+        <ul>
+          <li><code>(pianoroll pat)</code> - inline piano roll visualization</li>
+          <li><code>(scope pat)</code> - inline waveform/oscilloscope visualization</li>
+        </ul>
       </div>
     </div>
   `;
@@ -244,13 +571,19 @@ function setupEditor() {
 ; Ctrl+Enter to play | Ctrl+. to stop
 
 ; -- hyper light drift --
+; wrap patterns in (pianoroll ...) or (scope ...) for inline visualization!
+
 (stack
   ; crystalline lead melody - the drifter's theme
-  (room 0.6 (delay 0.5
-    (lpq 4 (lpf 2400 (gain 0.7
-      (slow 4 (seq
-        e5 ~ g5 b5 ~ ~ d5 ~
-        b4 ~ e5 ~ g5 ~ ~ ~)))))))
+  (pianoroll
+    (room 0.6 (delay 0.5
+      (lpq 4 (lpf 2400 (gain 0.7
+        (slow 4 (seq
+          e5 ~ g5 b5 ~ ~ d5 ~
+          b4 ~ e5 ~ g5 ~ ~ ~))))))))
+
+  ; LFO modulation visualized as scope (for continuous values)
+  (scope (slow 4 (sine)))
 
   ; warm chord bed - Em Cmaj7 G D
   (room 0.5 (lpf 1400 (gain 0.3
@@ -295,10 +628,10 @@ function setupEditor() {
       // Draggable numbers
       numberDragPlugin,
       numberDragTheme,
-      // Active event highlighting
-      activeLocationsField,
-      eventHighlightPlugin,
-      eventHighlightTheme,
+      // Active event highlighting (Strudel-style two-phase approach)
+      highlightExtension,
+      // Inline widgets (pianoroll, scope, etc.)
+      ...widgetExtension,
       keymap.of([
         {
           key: 'Ctrl-Enter',
@@ -337,11 +670,31 @@ function setupControls() {
   const cyclesInput = document.getElementById('cycles-input') as HTMLInputElement;
   const exportBtn = document.getElementById('export-btn')!;
 
+  // Mobile: ensure audio context can be resumed on any touch
+  const resumeAudio = async () => {
+    if (audio) {
+      await audio.ensureRunning();
+    }
+  };
+  document.addEventListener('touchstart', resumeAudio, { once: false, passive: true });
+  document.addEventListener('touchend', resumeAudio, { once: false, passive: true });
+
   playBtn.addEventListener('click', async () => {
     await startPlayback();
   });
 
+  // Also handle touch for mobile
+  playBtn.addEventListener('touchend', async (e) => {
+    e.preventDefault();
+    await startPlayback();
+  });
+
   stopBtn.addEventListener('click', () => {
+    stopPlayback();
+  });
+
+  stopBtn.addEventListener('touchend', (e) => {
+    e.preventDefault();
     stopPlayback();
   });
 
@@ -363,9 +716,8 @@ function setupControls() {
 
 async function startPlayback() {
   // Initialize audio on first play (requires user gesture)
-  if (!audio.isRunning) {
-    await audio.init();
-  }
+  // Always call init() - it handles resuming on mobile
+  await audio.init();
 
   // Always evaluate current code
   evaluateCode();
@@ -373,6 +725,13 @@ async function startPlayback() {
   if (currentPattern) {
     if (!scheduler.isRunning) {
       scheduler.start();
+      // Start the animation loops
+      startHighlightLoop();
+      startPianorollLoop();
+      startInlineWidgetLoops();
+    } else {
+      // Re-evaluate might have set up new widgets
+      startInlineWidgetLoops();
     }
     updateStatus('Playing...');
     document.getElementById('play-btn')!.textContent = 'Update';
@@ -381,9 +740,10 @@ async function startPlayback() {
 
 function stopPlayback() {
   scheduler.stop();
-  // Clear all highlights
-  activeHighlights.clear();
-  clearHighlights(editor);
+  // Stop the animation loops
+  stopHighlightLoop();
+  stopPianorollLoop();
+  stopInlineWidgetLoops();
   updateStatus('Stopped');
   document.getElementById('play-btn')!.textContent = 'Play';
 }
@@ -399,6 +759,48 @@ function evaluateCode() {
   try {
     currentPattern = evalLisp(code);
     updateStatus('Evaluated');
+
+    // Register all source locations for highlighting (phase 1 of Strudel approach)
+    try {
+      const locations = currentPattern.getAllLocations() as HighlightLocation[];
+      if (locations && locations.length > 0) {
+        updateAllLocations(editor, locations);
+        console.log(`Registered ${locations.length} source locations for highlighting`);
+      }
+    } catch (e) {
+      console.warn('Could not get locations for highlighting:', e);
+    }
+
+    // Get and set up inline widgets
+    try {
+      const rawWidgets = getWidgets() as unknown[];
+      // WASM returns Maps, convert to plain objects
+      const widgets: WasmWidgetConfig[] = rawWidgets.map((w: unknown) => {
+        if (w instanceof Map) {
+          return {
+            type: w.get('type') as 'pianoroll' | 'scope' | 'meter',
+            id: w.get('id') as string,
+            start: w.get('start') as number,
+            end: w.get('end') as number,
+          };
+        }
+        return w as WasmWidgetConfig;
+      });
+      if (widgets && widgets.length > 0) {
+        // Clear previous inline widgets
+        stopInlineWidgetLoops();
+        inlineWidgets.clear();
+
+        setupInlineWidgets(widgets);
+
+        // Start widget animations if already playing
+        if (scheduler.isRunning) {
+          startInlineWidgetLoops();
+        }
+      }
+    } catch (e) {
+      console.warn('Could not get widgets:', e);
+    }
 
     // Set up the query function for the scheduler
     scheduler.setPattern((start: number, end: number): SoundEvent[] => {

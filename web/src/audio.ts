@@ -76,22 +76,46 @@ export class AudioEngine {
 
   /**
    * Initialize the audio context (must be called from a user gesture).
+   * Mobile browsers require user interaction to start audio.
    */
   async init(): Promise<void> {
-    if (this.ctx) return;
+    if (!this.ctx) {
+      // Create AudioContext - on iOS/Safari, we may need to use webkitAudioContext
+      const AudioContextClass = window.AudioContext || (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext;
+      this.ctx = new AudioContextClass();
+    }
 
-    this.ctx = new AudioContext();
-    this.masterGain = this.ctx.createGain();
-    this.masterGain.gain.value = this.options.gain;
-    this.masterGain.connect(this.ctx.destination);
-
-    // Initialize effects
-    this.initDelay();
-    this.initReverb();
-
-    // Resume if suspended
+    // Always try to resume - mobile browsers are strict about this
     if (this.ctx.state === 'suspended') {
-      await this.ctx.resume();
+      try {
+        await this.ctx.resume();
+      } catch (e) {
+        console.warn('Failed to resume AudioContext:', e);
+      }
+    }
+
+    // Set up master gain if not already done
+    if (!this.masterGain) {
+      this.masterGain = this.ctx.createGain();
+      this.masterGain.gain.value = this.options.gain;
+      this.masterGain.connect(this.ctx.destination);
+
+      // Initialize effects
+      this.initDelay();
+      this.initReverb();
+    }
+  }
+
+  /**
+   * Ensure audio context is running (call on any user interaction).
+   */
+  async ensureRunning(): Promise<void> {
+    if (this.ctx && this.ctx.state === 'suspended') {
+      try {
+        await this.ctx.resume();
+      } catch (e) {
+        console.warn('Failed to resume AudioContext:', e);
+      }
     }
   }
 
