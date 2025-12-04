@@ -6,9 +6,16 @@ import { tags } from '@lezer/highlight';
 import { scheme } from '@codemirror/legacy-modes/mode/scheme';
 import init, { evalLisp, JsPattern } from 'crumble';
 import { AudioEngine, PatternScheduler } from './audio';
-import type { SoundEvent } from './audio';
+import type { SoundEvent, SourceLocation } from './audio';
 import { OfflineRenderer, encodeWAV, downloadBlob, formatDuration } from './export';
 import { numberDragPlugin, numberDragTheme } from './numberDrag';
+import {
+  activeLocationsField,
+  eventHighlightPlugin,
+  eventHighlightTheme,
+  highlightEvents,
+  clearHighlights,
+} from './eventHighlight';
 import './style.css';
 
 // Debounce helper
@@ -97,6 +104,10 @@ let scheduler: PatternScheduler;
 let currentPattern: JsPattern | null = null;
 let editor: EditorView;
 
+// Active highlights tracking
+const activeHighlights = new Map<number, SourceLocation[]>();
+let highlightIdCounter = 0;
+
 // Initialize WASM and audio
 async function initApp() {
   // Initialize WASM module
@@ -108,6 +119,32 @@ async function initApp() {
   scheduler = new PatternScheduler(audio);
   scheduler.cps = 0.5; // Default tempo
 
+  // Set up event highlighting callback
+  scheduler.onEvent = (event, triggerTime, duration) => {
+    if (!event.locations || event.locations.length === 0 || !editor) return;
+
+    // Calculate delay until the event actually plays
+    const now = audio.currentTime;
+    const delay = Math.max(0, (triggerTime - now) * 1000);
+
+    // Store this highlight with a unique ID
+    const highlightId = highlightIdCounter++;
+    const locations = event.locations;
+
+    // Schedule the highlight to appear when the event plays
+    setTimeout(() => {
+      activeHighlights.set(highlightId, locations);
+      updateHighlights();
+    }, delay);
+
+    // Schedule the highlight to disappear after a short duration
+    const highlightDuration = Math.min(duration * 1000, 200); // Max 200ms visual highlight
+    setTimeout(() => {
+      activeHighlights.delete(highlightId);
+      updateHighlights();
+    }, delay + highlightDuration);
+  };
+
   // Set up UI
   setupUI();
   setupEditor();
@@ -115,6 +152,19 @@ async function initApp() {
 
   // Update status
   updateStatus('Ready. Press Ctrl+Enter to evaluate.');
+}
+
+// Update the editor with all active highlights
+function updateHighlights() {
+  if (!editor) return;
+
+  // Collect all unique locations from active highlights
+  const allLocations: SourceLocation[] = [];
+  for (const locations of activeHighlights.values()) {
+    allLocations.push(...locations);
+  }
+
+  highlightEvents(editor, allLocations);
 }
 
 function setupUI() {
@@ -245,6 +295,10 @@ function setupEditor() {
       // Draggable numbers
       numberDragPlugin,
       numberDragTheme,
+      // Active event highlighting
+      activeLocationsField,
+      eventHighlightPlugin,
+      eventHighlightTheme,
       keymap.of([
         {
           key: 'Ctrl-Enter',
@@ -327,6 +381,9 @@ async function startPlayback() {
 
 function stopPlayback() {
   scheduler.stop();
+  // Clear all highlights
+  activeHighlights.clear();
+  clearHighlights(editor);
   updateStatus('Stopped');
   document.getElementById('play-btn')!.textContent = 'Play';
 }

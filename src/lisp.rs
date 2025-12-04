@@ -44,9 +44,30 @@
 //! ```
 
 use crate::fraction::Fraction;
+use crate::hap::Location;
 use crate::pattern::*;
 use std::collections::HashMap;
 use std::fmt;
+
+/// Source span tracking start and end byte offsets.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct Span {
+    pub start: usize,
+    pub end: usize,
+}
+
+impl Span {
+    pub fn new(start: usize, end: usize) -> Self {
+        Span { start, end }
+    }
+
+    pub fn to_location(self) -> Location {
+        Location {
+            start: self.start,
+            end: self.end,
+        }
+    }
+}
 
 /// A token from the lexer.
 #[derive(Debug, Clone, PartialEq)]
@@ -60,6 +81,13 @@ pub enum Token {
     Float(f64),
     String(String),
     Symbol(String),
+}
+
+/// A token with source location.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SpannedToken {
+    pub token: Token,
+    pub span: Span,
 }
 
 /// Tokenize a Lisp expression.
@@ -174,6 +202,151 @@ pub fn tokenize(input: &str) -> Result<Vec<Token>, LispError> {
     Ok(tokens)
 }
 
+/// Tokenize with source spans.
+pub fn tokenize_with_spans(input: &str) -> Result<Vec<SpannedToken>, LispError> {
+    let mut tokens = Vec::new();
+    let bytes = input.as_bytes();
+    let mut pos = 0;
+
+    while pos < bytes.len() {
+        let c = bytes[pos] as char;
+        match c {
+            ' ' | '\t' | '\n' | '\r' => {
+                pos += 1;
+            }
+            ';' => {
+                // Comment - skip to end of line
+                while pos < bytes.len() {
+                    let c = bytes[pos] as char;
+                    pos += 1;
+                    if c == '\n' {
+                        break;
+                    }
+                }
+            }
+            '(' => {
+                tokens.push(SpannedToken {
+                    token: Token::LParen,
+                    span: Span::new(pos, pos + 1),
+                });
+                pos += 1;
+            }
+            ')' => {
+                tokens.push(SpannedToken {
+                    token: Token::RParen,
+                    span: Span::new(pos, pos + 1),
+                });
+                pos += 1;
+            }
+            '[' => {
+                tokens.push(SpannedToken {
+                    token: Token::LBracket,
+                    span: Span::new(pos, pos + 1),
+                });
+                pos += 1;
+            }
+            ']' => {
+                tokens.push(SpannedToken {
+                    token: Token::RBracket,
+                    span: Span::new(pos, pos + 1),
+                });
+                pos += 1;
+            }
+            ',' => {
+                tokens.push(SpannedToken {
+                    token: Token::Comma,
+                    span: Span::new(pos, pos + 1),
+                });
+                pos += 1;
+            }
+            '"' => {
+                let start = pos;
+                pos += 1; // consume opening quote
+                let mut s = String::new();
+                while pos < bytes.len() {
+                    let c = bytes[pos] as char;
+                    pos += 1;
+                    if c == '"' {
+                        break;
+                    }
+                    if c == '\\' && pos < bytes.len() {
+                        let escaped = bytes[pos] as char;
+                        pos += 1;
+                        match escaped {
+                            'n' => s.push('\n'),
+                            't' => s.push('\t'),
+                            '\\' => s.push('\\'),
+                            '"' => s.push('"'),
+                            _ => s.push(escaped),
+                        }
+                    } else {
+                        s.push(c);
+                    }
+                }
+                tokens.push(SpannedToken {
+                    token: Token::String(s),
+                    span: Span::new(start, pos),
+                });
+            }
+            _ if c.is_ascii_digit() || (c == '-' && pos + 1 < bytes.len() && (bytes[pos + 1] as char).is_ascii_digit()) => {
+                let start = pos;
+                let mut num = String::new();
+                if c == '-' {
+                    num.push(c);
+                    pos += 1;
+                }
+                while pos < bytes.len() {
+                    let c = bytes[pos] as char;
+                    if c.is_ascii_digit() || c == '.' {
+                        num.push(c);
+                        pos += 1;
+                    } else {
+                        break;
+                    }
+                }
+                let token = if num.contains('.') {
+                    Token::Float(num.parse().map_err(|_| {
+                        LispError::ParseError(format!("Invalid float: {}", num))
+                    })?)
+                } else {
+                    Token::Integer(num.parse().map_err(|_| {
+                        LispError::ParseError(format!("Invalid integer: {}", num))
+                    })?)
+                };
+                tokens.push(SpannedToken {
+                    token,
+                    span: Span::new(start, pos),
+                });
+            }
+            _ if is_symbol_char(c) => {
+                let start = pos;
+                let mut sym = String::new();
+                while pos < bytes.len() {
+                    let c = bytes[pos] as char;
+                    if is_symbol_char(c) {
+                        sym.push(c);
+                        pos += 1;
+                    } else {
+                        break;
+                    }
+                }
+                tokens.push(SpannedToken {
+                    token: Token::Symbol(sym),
+                    span: Span::new(start, pos),
+                });
+            }
+            _ => {
+                return Err(LispError::ParseError(format!(
+                    "Unexpected character: {}",
+                    c
+                )));
+            }
+        }
+    }
+
+    Ok(tokens)
+}
+
 fn is_symbol_char(c: char) -> bool {
     c.is_alphanumeric() || matches!(c, '_' | '-' | '+' | '*' | '/' | '!' | '?' | '<' | '>' | '=' | ':' | '.' | '~')
 }
@@ -186,6 +359,13 @@ pub enum Expr {
     String(String),
     Symbol(String),
     List(Vec<Expr>),
+}
+
+/// AST node with source location.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SpannedExpr {
+    pub expr: Expr,
+    pub span: Span,
 }
 
 impl fmt::Display for Expr {
@@ -276,6 +456,95 @@ fn parse_expr(tokens: &[Token], pos: &mut usize) -> Result<Expr, LispError> {
             }
             *pos += 1; // consume ]
             Ok(Expr::List(items))
+        }
+        Token::RParen => Err(LispError::ParseError("Unexpected ')'".to_string())),
+        Token::RBracket => Err(LispError::ParseError("Unexpected ']'".to_string())),
+        Token::Comma => Err(LispError::ParseError("Unexpected ','".to_string())),
+    }
+}
+
+/// Parse spanned tokens into a spanned AST.
+pub fn parse_spanned(tokens: &[SpannedToken]) -> Result<SpannedExpr, LispError> {
+    let mut pos = 0;
+    parse_spanned_expr(tokens, &mut pos)
+}
+
+fn parse_spanned_expr(tokens: &[SpannedToken], pos: &mut usize) -> Result<SpannedExpr, LispError> {
+    if *pos >= tokens.len() {
+        return Err(LispError::ParseError("Unexpected end of input".to_string()));
+    }
+
+    let start_span = tokens[*pos].span;
+
+    match &tokens[*pos].token {
+        Token::Integer(n) => {
+            *pos += 1;
+            Ok(SpannedExpr {
+                expr: Expr::Integer(*n),
+                span: start_span,
+            })
+        }
+        Token::Float(n) => {
+            *pos += 1;
+            Ok(SpannedExpr {
+                expr: Expr::Float(*n),
+                span: start_span,
+            })
+        }
+        Token::String(s) => {
+            *pos += 1;
+            Ok(SpannedExpr {
+                expr: Expr::String(s.clone()),
+                span: start_span,
+            })
+        }
+        Token::Symbol(s) => {
+            *pos += 1;
+            Ok(SpannedExpr {
+                expr: Expr::Symbol(s.clone()),
+                span: start_span,
+            })
+        }
+        Token::LParen => {
+            *pos += 1; // consume (
+            let mut items = Vec::new();
+            while *pos < tokens.len() && tokens[*pos].token != Token::RParen {
+                items.push(parse_spanned_expr(tokens, pos)?);
+            }
+            if *pos >= tokens.len() {
+                return Err(LispError::ParseError("Unclosed parenthesis".to_string()));
+            }
+            let end_span = tokens[*pos].span;
+            *pos += 1; // consume )
+            Ok(SpannedExpr {
+                expr: Expr::List(items.iter().map(|e| e.expr.clone()).collect()),
+                span: Span::new(start_span.start, end_span.end),
+            })
+        }
+        Token::LBracket => {
+            // [a, b, c] is sugar for (stack a b c)
+            *pos += 1; // consume [
+            let mut items = vec![SpannedExpr {
+                expr: Expr::Symbol("stack".to_string()),
+                span: start_span,
+            }];
+            while *pos < tokens.len() && tokens[*pos].token != Token::RBracket {
+                // Skip commas
+                if tokens[*pos].token == Token::Comma {
+                    *pos += 1;
+                    continue;
+                }
+                items.push(parse_spanned_expr(tokens, pos)?);
+            }
+            if *pos >= tokens.len() {
+                return Err(LispError::ParseError("Unclosed bracket".to_string()));
+            }
+            let end_span = tokens[*pos].span;
+            *pos += 1; // consume ]
+            Ok(SpannedExpr {
+                expr: Expr::List(items.iter().map(|e| e.expr.clone()).collect()),
+                span: Span::new(start_span.start, end_span.end),
+            })
         }
         Token::RParen => Err(LispError::ParseError("Unexpected ')'".to_string())),
         Token::RBracket => Err(LispError::ParseError("Unexpected ']'".to_string())),
@@ -1108,6 +1377,67 @@ pub fn run_lisp(input: &str) -> Result<Value, LispError> {
     let expr = parse(&tokens)?;
     let mut env = Env::new();
     eval(&expr, &mut env)
+}
+
+/// Parse and evaluate with source location tracking.
+/// Returns a Pattern<Value> with source locations attached for highlighting.
+pub fn run_lisp_with_locations(input: &str) -> Result<Value, LispError> {
+    let tokens = tokenize_with_spans(input)?;
+    let expr = parse_spanned(&tokens)?;
+    let mut env = Env::new();
+    eval_spanned(&expr, &mut env)
+}
+
+/// Evaluate a spanned expression, attaching source locations to patterns.
+fn eval_spanned(expr: &SpannedExpr, env: &mut Env) -> Result<Value, LispError> {
+    let span = expr.span;
+    let location = span.to_location();
+
+    match &expr.expr {
+        Expr::Integer(n) => Ok(Value::Integer(*n)),
+        Expr::Float(n) => Ok(Value::Float(*n)),
+        Expr::String(s) => Ok(Value::String(s.clone())),
+        Expr::Symbol(s) => {
+            // Special case: ~ means silence/rest
+            if s == "~" {
+                return Ok(Value::Pattern(silence().with_location(location)));
+            }
+            if let Some(val) = env.get(s) {
+                // For bound variables, we still want to attach our location
+                match val {
+                    Value::Pattern(p) => Ok(Value::Pattern(p.clone().with_location(location))),
+                    other => Ok(other.clone()),
+                }
+            } else {
+                // Treat unknown symbols as string values (like note names)
+                // These become patterns, so attach location
+                Ok(Value::String(s.clone()))
+            }
+        }
+        Expr::List(items) => {
+            if items.is_empty() {
+                return Err(LispError::EvalError("Empty list".to_string()));
+            }
+
+            // Get the function
+            let func = eval(&items[0], env)?;
+            let args = &items[1..];
+
+            let result = match func {
+                Value::Function(name) => eval_builtin(&name, args, env),
+                _ => Err(LispError::TypeError(format!(
+                    "Expected function, got {:?}",
+                    func
+                ))),
+            }?;
+
+            // Attach location to resulting pattern
+            match result {
+                Value::Pattern(p) => Ok(Value::Pattern(p.with_location(location))),
+                other => Ok(other),
+            }
+        }
+    }
 }
 
 /// Get the pattern from a value (convenience for testing).

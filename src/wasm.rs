@@ -6,7 +6,7 @@
 use wasm_bindgen::prelude::*;
 
 use crate::fraction::Fraction;
-use crate::lisp::{run_lisp as eval_lisp, Value};
+use crate::lisp::{run_lisp_with_locations as eval_lisp, Value};
 use crate::pattern::{self, Pattern};
 use crate::state::State;
 use crate::timespan::TimeSpan;
@@ -84,6 +84,16 @@ impl JsPattern {
                     .iter()
                     .map(|(k, v)| (k.clone(), serde_json::json!(v)))
                     .collect();
+                // Convert context.locations to JSON array for highlighting
+                let locations: Vec<serde_json::Value> = hap
+                    .context
+                    .locations
+                    .iter()
+                    .map(|loc| serde_json::json!({
+                        "start": loc.start,
+                        "end": loc.end,
+                    }))
+                    .collect();
                 serde_json::json!({
                     "start": hap.part.begin.to_f64(),
                     "end": hap.part.end.to_f64(),
@@ -91,6 +101,7 @@ impl JsPattern {
                     "whole_end": hap.whole.as_ref().map(|w| w.end.to_f64()),
                     "value": value,
                     "meta": meta,
+                    "locations": locations,
                 })
             })
             .collect();

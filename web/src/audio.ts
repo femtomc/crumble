@@ -25,6 +25,11 @@ export interface EffectMeta {
   comp_release?: number;   // Compressor release (seconds, 0 to 1)
 }
 
+export interface SourceLocation {
+  start: number;      // Start byte offset in source
+  end: number;        // End byte offset in source
+}
+
 export interface SoundEvent {
   start: number;      // Start time in cycles
   end: number;        // End time in cycles
@@ -32,6 +37,7 @@ export interface SoundEvent {
   whole_start?: number;
   whole_end?: number;
   meta?: Record<string, string>;  // Effect metadata from Rust
+  locations?: SourceLocation[];   // Source locations for highlighting
 }
 
 export interface AudioEngineOptions {
@@ -538,6 +544,8 @@ export class AudioEngine {
  * - Schedules events with latency compensation
  * - Warns if events would be scheduled in the past
  */
+export type EventCallback = (event: SoundEvent, triggerTime: number, duration: number) => void;
+
 export class PatternScheduler {
   private audio: AudioEngine;
   private running = false;
@@ -553,6 +561,9 @@ export class PatternScheduler {
 
   // Query function provided by user
   private queryFn: ((start: number, end: number) => SoundEvent[]) | null = null;
+
+  // Event callback for UI updates (e.g., highlighting)
+  public onEvent: EventCallback | null = null;
 
   // Scheduled event tracking to avoid duplicates
   private scheduledEvents = new Set<string>();
@@ -669,8 +680,27 @@ export class PatternScheduler {
       // Extract effect metadata
       const meta = event instanceof Map ? event.get('meta') : event.meta;
 
+      // Extract source locations for highlighting
+      const locations = event instanceof Map ? event.get('locations') : event.locations;
+
+      // Construct normalized event for callback
+      const normalizedEvent: SoundEvent = {
+        start,
+        end,
+        value,
+        whole_start,
+        whole_end,
+        meta,
+        locations,
+      };
+
       this.audio.playAt(triggerTime, actualDuration, value, meta);
       this.scheduledEvents.add(eventKey);
+
+      // Call event callback for UI updates (e.g., highlighting)
+      if (this.onEvent) {
+        this.onEvent(normalizedEvent, triggerTime, actualDuration);
+      }
 
       // Clean up old event keys (keep set from growing unbounded)
       if (this.scheduledEvents.size > 1000) {

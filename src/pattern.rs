@@ -269,6 +269,15 @@ impl<T: Clone + Send + Sync + 'static> Pattern<T> {
         })
     }
 
+    /// Add a source location to all haps.
+    /// This is used for highlighting active events in the editor.
+    pub fn with_location(self, location: crate::hap::Location) -> Self {
+        self.with_hap(move |mut hap| {
+            hap.context.locations.push(location.clone());
+            hap
+        })
+    }
+
     // ============================================
     // Utility methods
     // ============================================
