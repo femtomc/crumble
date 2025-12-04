@@ -1,5 +1,6 @@
 import { EditorView, basicSetup } from 'codemirror';
 import { keymap } from '@codemirror/view';
+import type { ViewUpdate } from '@codemirror/view';
 import { HighlightStyle, syntaxHighlighting, StreamLanguage } from '@codemirror/language';
 import { tags } from '@lezer/highlight';
 import { scheme } from '@codemirror/legacy-modes/mode/scheme';
@@ -7,7 +8,17 @@ import init, { evalLisp, JsPattern } from 'crumble';
 import { AudioEngine, PatternScheduler } from './audio';
 import type { SoundEvent } from './audio';
 import { OfflineRenderer, encodeWAV, downloadBlob, formatDuration } from './export';
+import { numberDragPlugin, numberDragTheme } from './numberDrag';
 import './style.css';
+
+// Debounce helper
+function debounce<T extends (...args: unknown[]) => void>(fn: T, delay: number): T {
+  let timeoutId: ReturnType<typeof setTimeout>;
+  return ((...args: unknown[]) => {
+    clearTimeout(timeoutId);
+    timeoutId = setTimeout(() => fn(...args), delay);
+  }) as T;
+}
 
 // Monospace theme with actual color values (CSS vars don't work in CM themes)
 const monospaceTheme = EditorView.theme({
@@ -216,6 +227,13 @@ function setupEditor() {
         [c3, g3] ~ [d3, a3] ~)))))))
 )`;
 
+  // Debounced auto-evaluate for live coding
+  const debouncedEvaluate = debounce(() => {
+    if (scheduler.isRunning) {
+      evaluateCode();
+    }
+  }, 200);
+
   editor = new EditorView({
     doc: defaultCode,
     extensions: [
@@ -224,6 +242,9 @@ function setupEditor() {
       monospaceTheme,
       syntaxHighlighting(monospaceHighlight),
       EditorView.lineWrapping,
+      // Draggable numbers
+      numberDragPlugin,
+      numberDragTheme,
       keymap.of([
         {
           key: 'Ctrl-Enter',
@@ -242,6 +263,12 @@ function setupEditor() {
           },
         },
       ]),
+      // Auto-evaluate on document changes while playing
+      EditorView.updateListener.of((update: ViewUpdate) => {
+        if (update.docChanged) {
+          debouncedEvaluate();
+        }
+      }),
     ],
     parent: editorContainer,
   });
@@ -286,13 +313,13 @@ async function startPlayback() {
     await audio.init();
   }
 
-  // Evaluate current code if no pattern
-  if (!currentPattern) {
-    evaluateCode();
-  }
+  // Always evaluate current code
+  evaluateCode();
 
   if (currentPattern) {
-    scheduler.start();
+    if (!scheduler.isRunning) {
+      scheduler.start();
+    }
     updateStatus('Playing...');
     document.getElementById('play-btn')!.textContent = 'Update';
   }
