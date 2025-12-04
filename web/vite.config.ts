@@ -3,6 +3,7 @@ import wasm from 'vite-plugin-wasm'
 
 export default defineConfig({
   plugins: [wasm()],
+  base: '/crumble/',  // GitHub Pages base path
   build: {
     target: 'esnext',
   },
