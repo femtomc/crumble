@@ -291,12 +291,12 @@ export class PatternScheduler {
   private running = false;
   private startTime = 0;
   private lastQueryEnd = 0;
-  private animationId: number | null = null;
+  private timerId: number | null = null;
 
   // Timing configuration
   public cps = 0.5;           // Cycles per second (tempo)
-  public lookahead = 0.1;     // How far ahead to schedule (seconds)
-  public tickInterval = 50;   // How often to tick (ms)
+  public lookahead = 0.25;    // How far ahead to schedule (seconds) - increased for stability
+  public tickInterval = 25;   // How often to tick (ms) - decreased for tighter timing
 
   // Query function provided by user
   private queryFn: ((start: number, end: number) => SoundEvent[]) | null = null;
@@ -321,7 +321,10 @@ export class PatternScheduler {
     this.running = true;
     this.startTime = this.audio.currentTime;
     this.lastQueryEnd = 0;
+
+    // Use setInterval for consistent timing (works even when tab is backgrounded)
     this.tick();
+    this.timerId = window.setInterval(this.tick, this.tickInterval);
   }
 
   /**
@@ -329,9 +332,9 @@ export class PatternScheduler {
    */
   stop(): void {
     this.running = false;
-    if (this.animationId !== null) {
-      cancelAnimationFrame(this.animationId);
-      this.animationId = null;
+    if (this.timerId !== null) {
+      clearInterval(this.timerId);
+      this.timerId = null;
     }
   }
 
@@ -379,10 +382,6 @@ export class PatternScheduler {
 
       this.lastQueryEnd = queryEnd;
     }
-
-    // Schedule next tick
-    setTimeout(() => {
-      this.animationId = requestAnimationFrame(this.tick);
-    }, this.tickInterval);
+    // tick is called by setInterval, no need to reschedule here
   };
 }
