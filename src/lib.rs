@@ -35,8 +35,8 @@
 //! With the `audio` feature, you can play patterns directly:
 //!
 //! ```rust,ignore
-//! use strudel_rs::player::Player;
-//! use strudel_rs::pattern::{sequence, pure};
+//! use crumble::player::Player;
+//! use crumble::pattern::{sequence, pure};
 //!
 //! let player = Player::with_audio().unwrap();
 //! let pat = sequence(vec![pure("sine"), pure("saw"), pure("square")]);

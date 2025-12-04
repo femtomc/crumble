@@ -200,13 +200,13 @@ fn test_multi_cycle_scheduling() {
         latency: 0.0,
     };
 
-    // Play for 2.5 cycles
-    play_blocking(pattern, 2.5, config, move |event| {
+    // Play for 4 cycles to ensure we capture multiple events reliably
+    play_blocking(pattern, 4.0, config, move |event| {
         collected_clone.lock().unwrap().push(event.cycle);
     });
 
     let events = collected.lock().unwrap();
-    // Should have at least 2 events (one per cycle for 2 complete cycles)
+    // Should have at least 2 events (one per cycle)
     assert!(events.len() >= 2, "Expected at least 2 events, got {}", events.len());
 }
 

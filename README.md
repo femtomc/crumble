@@ -1,4 +1,4 @@
-# strudel-rs
+# crumble
 
 A Rust implementation of the [Strudel](https://strudel.cc) pattern language for algorithmic music.
 
@@ -14,7 +14,7 @@ Strudel is a live coding environment that implements the TidalCycles pattern lan
 ## Usage
 
 ```rust
-use strudel_rs::prelude::*;
+use crumble::prelude::*;
 
 // Create a simple sequence
 let pat = sequence(vec![pure(1), pure(2), pure(3), pure(4)]);
