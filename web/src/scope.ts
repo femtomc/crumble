@@ -109,13 +109,6 @@ function getValue(hap: ScopeHap): number | null {
 }
 
 /**
- * Linear interpolation.
- */
-function scale(normalized: number, min: number, max: number): number {
-  return normalized * (max - min) + min;
-}
-
-/**
  * Draw a scope (waveform) visualization.
  */
 export function drawScope(
