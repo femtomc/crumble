@@ -148,6 +148,7 @@ function setupUI() {
         <ul>
           <li><code>(seq a b c)</code> - sequence patterns</li>
           <li><code>(stack a b)</code> - layer patterns</li>
+          <li><code>~</code> - rest/silence</li>
           <li><code>(fast n pat)</code> - speed up</li>
           <li><code>(slow n pat)</code> - slow down</li>
           <li><code>(euclid k n val)</code> - euclidean rhythm</li>
@@ -179,21 +180,21 @@ function setupEditor() {
   ; ethereal lead melody
   (room 0.6 (delay 0.5
     (lpq 4 (lpf 2000
-      (slow 4 (seq e4 g4 b4 e5 d5 b4 g4 f#4))))))
+      (slow 4 (seq e4 ~ g4 b4 e5 ~ d5 b4))))))
 
   ; shimmering arpeggio
   (pan -0.3 (room 0.5 (delay 0.4
     (lpf 3000 (gain 0.4
-      (fast 2 (seq e5 b4 g4 e4 g4 b4 e5 d5)))))))
+      (fast 2 (seq e5 b4 ~ e4 g4 b4 ~ d5)))))))
 
   ; slow 808 bass - sparse and heavy
   (drive 0.3 (lpf 180 (comp -24
-    (slow 4 (seq e2 e2 e2 b1)))))
+    (slow 2 (seq e2 ~ ~ e2 ~ e2 ~ b1)))))
 
   ; distant pad drone
   (pan 0.3 (room 0.7
     (lpq 2 (lpf 800 (gain 0.25
-      (slow 8 (seq e3 b3 g3 b3)))))))
+      (slow 8 (seq e3 ~ b3 ~ g3 ~ b3 ~)))))))
 )`;
 
   editor = new EditorView({

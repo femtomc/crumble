@@ -369,6 +369,10 @@ pub fn eval(expr: &Expr, env: &mut Env) -> Result<Value, LispError> {
         Expr::Float(n) => Ok(Value::Float(*n)),
         Expr::String(s) => Ok(Value::String(s.clone())),
         Expr::Symbol(s) => {
+            // Special case: ~ means silence/rest
+            if s == "~" {
+                return Ok(Value::Pattern(silence()));
+            }
             if let Some(val) = env.get(s) {
                 Ok(val.clone())
             } else {
