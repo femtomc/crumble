@@ -57,7 +57,7 @@ pub mod pattern;
 pub mod state;
 pub mod timespan;
 
-// Playback modules
+// Playback modules (scheduler data types always available)
 pub mod scheduler;
 
 #[cfg(feature = "audio")]
@@ -68,6 +68,10 @@ pub mod osc;
 
 #[cfg(feature = "audio")]
 pub mod player;
+
+// WASM bindings
+#[cfg(feature = "wasm")]
+pub mod wasm;
 
 // Re-export core types
 pub use fraction::Fraction;
@@ -81,8 +85,12 @@ pub use state::{ControlValue, State};
 pub use timespan::TimeSpan;
 pub use lisp::{run_lisp, Env, Expr, LispError, Token, Value};
 
-// Re-export scheduler
-pub use scheduler::{SchedulerConfig, SchedulerHandle, ScheduledEvent, start_scheduler, play_blocking};
+// Re-export scheduler data types (always available)
+pub use scheduler::{SchedulerConfig, ScheduledEvent};
+
+// Re-export scheduler functions (native only)
+#[cfg(not(target_arch = "wasm32"))]
+pub use scheduler::{SchedulerHandle, start_scheduler, play_blocking};
 
 // Re-export audio (when feature enabled)
 #[cfg(feature = "audio")]
@@ -108,7 +116,10 @@ pub mod prelude {
     pub use crate::state::State;
     pub use crate::timespan::TimeSpan;
     pub use crate::lisp::{run_lisp, Value};
-    pub use crate::scheduler::{SchedulerConfig, play_blocking};
+    pub use crate::scheduler::SchedulerConfig;
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub use crate::scheduler::play_blocking;
 
     #[cfg(feature = "audio")]
     pub use crate::player::{Player, PlayerConfig};

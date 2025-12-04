@@ -11,6 +11,9 @@ release/
 **/*.rs.bk
 *.pdb
 
+# WASM build output
+/pkg/
+
 # IDE/Editor
 .idea/
 .vscode/
@@ -29,3 +32,8 @@ release/
 coverage/
 lcov.info
 tarpaulin-report.html
+
+# Web frontend
+web/node_modules/
+web/dist/
+web/.vite/
