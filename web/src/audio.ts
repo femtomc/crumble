@@ -285,21 +285,30 @@ export class AudioEngine {
 
 /**
  * Scheduler that queries patterns and triggers audio events.
+ *
+ * Based on Strudel's cyclist/zyklus architecture:
+ * - Uses a clock with lookahead + overlap for robust timing
+ * - Schedules events with latency compensation
+ * - Warns if events would be scheduled in the past
  */
 export class PatternScheduler {
   private audio: AudioEngine;
   private running = false;
-  private startTime = 0;
-  private lastQueryEnd = 0;
+  private phase = 0;           // Current phase in audio time (seconds)
+  private lastTickTime = 0;    // Last time tick() was called
   private timerId: number | null = null;
 
-  // Timing configuration
-  public cps = 0.5;           // Cycles per second (tempo)
-  public lookahead = 0.25;    // How far ahead to schedule (seconds) - increased for stability
-  public tickInterval = 25;   // How often to tick (ms) - decreased for tighter timing
+  // Timing configuration (matching Strudel's defaults)
+  public cps = 0.5;            // Cycles per second (tempo)
+  public interval = 0.05;      // Clock cycle duration (seconds)
+  public lookahead = 0.1;      // How far ahead to look (seconds)
+  public latency = 0.1;        // Latency compensation (seconds) - events scheduled this far ahead
 
   // Query function provided by user
   private queryFn: ((start: number, end: number) => SoundEvent[]) | null = null;
+
+  // Scheduled event tracking to avoid duplicates
+  private scheduledEvents = new Set<string>();
 
   constructor(audio: AudioEngine) {
     this.audio = audio;
@@ -310,6 +319,8 @@ export class PatternScheduler {
    */
   setPattern(queryFn: (start: number, end: number) => SoundEvent[]): void {
     this.queryFn = queryFn;
+    // Clear scheduled events when pattern changes
+    this.scheduledEvents.clear();
   }
 
   /**
@@ -319,12 +330,14 @@ export class PatternScheduler {
     if (this.running || !this.queryFn) return;
 
     this.running = true;
-    this.startTime = this.audio.currentTime;
-    this.lastQueryEnd = 0;
+    this.phase = 0;
+    this.lastTickTime = this.audio.currentTime;
+    this.scheduledEvents.clear();
 
-    // Use setInterval for consistent timing (works even when tab is backgrounded)
+    // Initial tick
     this.tick();
-    this.timerId = window.setInterval(this.tick, this.tickInterval);
+    // Use setInterval for consistent timing
+    this.timerId = window.setInterval(this.tick, this.interval * 1000);
   }
 
   /**
@@ -336,6 +349,7 @@ export class PatternScheduler {
       clearInterval(this.timerId);
       this.timerId = null;
     }
+    this.scheduledEvents.clear();
   }
 
   /**
@@ -348,40 +362,73 @@ export class PatternScheduler {
   private tick = (): void => {
     if (!this.running || !this.queryFn) return;
 
-    const now = this.audio.currentTime - this.startTime;
-    const queryEnd = (now + this.lookahead) * this.cps;
+    const currentTime = this.audio.currentTime;
+    const elapsed = currentTime - this.lastTickTime;
+    this.lastTickTime = currentTime;
 
-    if (queryEnd > this.lastQueryEnd) {
-      const queryStart = this.lastQueryEnd;
+    // Advance phase by elapsed time
+    this.phase += elapsed;
 
-      // Query the pattern
-      const events = this.queryFn(queryStart, queryEnd);
+    // Calculate the lookahead window in audio time
+    const lookEnd = this.phase + this.lookahead + this.latency;
 
-      // Schedule events
-      for (const event of events) {
-        // Handle both Map objects (from serde_wasm_bindgen) and plain objects
-        const start = event instanceof Map ? event.get('start') : event.start;
-        const end = event instanceof Map ? event.get('end') : event.end;
-        const value = event instanceof Map ? event.get('value') : event.value;
-        const whole_start = event instanceof Map ? event.get('whole_start') : event.whole_start;
-        const whole_end = event instanceof Map ? event.get('whole_end') : event.whole_end;
+    // Convert to cycle time for querying
+    const beginCycle = this.phase * this.cps;
+    const endCycle = lookEnd * this.cps;
 
-        // Only schedule events with onsets in this window
-        if (start >= queryStart && start < queryEnd) {
-          const triggerTime = this.startTime + start / this.cps;
-          const duration = (end - start) / this.cps;
+    // Query the pattern for events in this window
+    const events = this.queryFn(beginCycle, endCycle);
 
-          // Use whole duration if available
-          const actualDuration = whole_end && whole_start
-            ? (whole_end - whole_start) / this.cps
-            : duration;
+    // Schedule events
+    for (const event of events) {
+      // Handle both Map objects (from serde_wasm_bindgen) and plain objects
+      const start = event instanceof Map ? event.get('start') : event.start;
+      const end = event instanceof Map ? event.get('end') : event.end;
+      const value = event instanceof Map ? event.get('value') : event.value;
+      const whole_start = event instanceof Map ? event.get('whole_start') : event.whole_start;
+      const whole_end = event instanceof Map ? event.get('whole_end') : event.whole_end;
 
-          this.audio.playAt(triggerTime, actualDuration, value);
+      // Create unique key for this event to avoid double-scheduling
+      const eventKey = `${start.toFixed(6)}-${value}`;
+      if (this.scheduledEvents.has(eventKey)) {
+        continue;
+      }
+
+      // Convert cycle time back to audio time
+      const onsetAudioTime = start / this.cps;
+      const endAudioTime = end / this.cps;
+
+      // Calculate absolute trigger time with latency compensation
+      const triggerTime = currentTime - this.phase + onsetAudioTime + this.latency;
+
+      // Warn if we're trying to schedule in the past
+      if (triggerTime < currentTime) {
+        console.warn(
+          `[scheduler] Event scheduled in the past: ${(currentTime - triggerTime).toFixed(3)}s late`
+        );
+        // Skip events that are too far in the past
+        if (triggerTime < currentTime - 0.1) {
+          continue;
         }
       }
 
-      this.lastQueryEnd = queryEnd;
+      const duration = endAudioTime - onsetAudioTime;
+
+      // Use whole duration if available for sustained notes
+      const actualDuration = whole_end != null && whole_start != null
+        ? (whole_end - whole_start) / this.cps
+        : duration;
+
+      this.audio.playAt(triggerTime, actualDuration, value);
+      this.scheduledEvents.add(eventKey);
+
+      // Clean up old event keys (keep set from growing unbounded)
+      if (this.scheduledEvents.size > 1000) {
+        const keys = Array.from(this.scheduledEvents);
+        for (let i = 0; i < 500; i++) {
+          this.scheduledEvents.delete(keys[i]);
+        }
+      }
     }
-    // tick is called by setInterval, no need to reschedule here
   };
 }
